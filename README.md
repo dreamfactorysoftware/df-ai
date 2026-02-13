@@ -1,6 +1,8 @@
 ## DreamFactory AI
 
-> **Note:** This repository contains an optional AI service package for DreamFactory. If you want the full DreamFactory platform, visit the main [DreamFactory repository](https://github.com/dreamfactorysoftware/dreamfactory).
+> **Note:** This repository contains an AI service package for DreamFactory. If you want the full DreamFactory platform, visit the main [DreamFactory repository](https://github.com/dreamfactorysoftware/dreamfactory).
+
+DreamFactory is a secure, self-hosted enterprise data access platform that provides governed API access to any data source, connecting enterprise applications and on-prem LLMs with role-based access and identity passthrough.
 
 ## Overview
 
@@ -62,11 +64,6 @@ Create a new service in the DreamFactory admin panel:
 3. Choose a provider, enter your API key, and configure defaults
 4. Save and use the service API endpoints
 
-## Feedback and Contributions
-
-- Feedback is welcome in the form of pull requests and/or issues.
-- Contributions should generally follow the strategy outlined in ["Contributing to a project"](https://help.github.com/articles/fork-a-repo#contributing-to-a-project).
-- All pull requests must be in a ["git flow"](https://github.com/nvie/gitflow) feature branch based on our develop branch and formatted as [PSR-2 compliant](http://www.php-fig.org/psr/psr-2/) to be considered.
 
 ### License
 
