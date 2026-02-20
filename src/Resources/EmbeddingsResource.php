@@ -3,6 +3,7 @@
 namespace DreamFactory\Core\AI\Resources;
 
 use DreamFactory\Core\AI\Services\AiConnection;
+use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
@@ -124,19 +125,19 @@ class EmbeddingsResource extends BaseRestResource
     protected function handlePOST()
     {
         $payload = $this->getPayloadData();
-        $input = $payload['input'] ?? null;
 
-        if (empty($input)) {
-            throw new BadRequestException('"input" (string or array of strings) is required.');
-        }
+        $this->validatePayload($payload);
 
         /** @var AiConnection $service */
         $service = $this->getService();
         $provider = $service->getProvider();
+
+        RateLimiter::check($service->getServiceId(), $provider->getProviderName());
+
         $start = hrtime(true);
 
         try {
-            $result = $provider->embeddings($input, [
+            $result = $provider->embeddings($payload['input'], [
                 'model' => $payload['model'] ?? null,
             ]);
 
@@ -162,5 +163,40 @@ class EmbeddingsResource extends BaseRestResource
             );
             throw $e;
         }
+    }
+
+    /**
+     * Validate embeddings request payload.
+     *
+     * @throws BadRequestException
+     */
+    private function validatePayload(array $payload): void
+    {
+        $input = $payload['input'] ?? null;
+
+        if ($input === null) {
+            throw new BadRequestException('"input" (string or array of strings) is required.');
+        }
+
+        if (is_string($input)) {
+            if (trim($input) === '') {
+                throw new BadRequestException('"input" must be a non-empty string or array of strings.');
+            }
+            return;
+        }
+
+        if (is_array($input)) {
+            if (empty($input)) {
+                throw new BadRequestException('"input" array must not be empty.');
+            }
+            foreach ($input as $i => $item) {
+                if (!is_string($item) || trim($item) === '') {
+                    throw new BadRequestException("input[{$i}] must be a non-empty string.");
+                }
+            }
+            return;
+        }
+
+        throw new BadRequestException('"input" must be a string or array of strings.');
     }
 }

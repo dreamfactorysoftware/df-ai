@@ -89,49 +89,32 @@ class OpenAICompatibleProvider extends BaseAiProvider
             array_unshift($messages, ['role' => 'system', 'content' => $this->systemPrompt]);
         }
 
-        // Convert tools to OpenAI function calling format.
-        $openaiTools = [];
-        foreach ($tools as $tool) {
-            $openaiTools[] = [
-                'type'     => 'function',
-                'function' => [
-                    'name'        => $tool['name'],
-                    'description' => $tool['description'] ?? '',
-                    'parameters'  => $tool['input_schema'] ?? ['type' => 'object', 'properties' => new \stdClass()],
-                ],
-            ];
-        }
-
         $payload = array_merge([
             'model'       => $model,
             'max_tokens'  => $maxTokens,
             'temperature' => $temperature,
             'messages'    => $messages,
-            'tools'       => $openaiTools,
+            'tools'       => ToolDefinition::toOpenAIArray($tools),
         ], $this->extraParams);
 
         $body = $this->request('POST', '/v1/chat/completions', ['json' => $payload]);
 
-        if (!isset($body['choices'][0])) {
+        if (!isset($body['choices'][0]['message'])) {
             throw new RuntimeException(
                 $this->getProviderName() . ' API returned unexpected response: '
                 . substr((string) json_encode($body), 0, 300)
             );
         }
 
-        $choice = $body['choices'][0];
-        $message = $choice['message'] ?? [];
+        $message = $body['choices'][0]['message'];
+        $finishReason = $body['choices'][0]['finish_reason'] ?? 'unknown';
 
         $toolCalls = null;
         if (!empty($message['tool_calls'])) {
-            $toolCalls = [];
-            foreach ($message['tool_calls'] as $tc) {
-                $toolCalls[] = [
-                    'id'    => $tc['id'],
-                    'name'  => $tc['function']['name'],
-                    'input' => json_decode($tc['function']['arguments'] ?? '{}', true) ?? [],
-                ];
-            }
+            $toolCalls = array_map(
+                fn(array $tc) => ToolCall::fromOpenAI($tc)->toArray(),
+                $message['tool_calls'],
+            );
         }
 
         return [
@@ -141,42 +124,7 @@ class OpenAICompatibleProvider extends BaseAiProvider
             'model'         => $body['model'] ?? $model,
             'input_tokens'  => $body['usage']['prompt_tokens'] ?? 0,
             'output_tokens' => $body['usage']['completion_tokens'] ?? 0,
-            'finish_reason' => $choice['finish_reason'] ?? 'unknown',
-        ];
-    }
-
-    public function supportsToolUse(): bool
-    {
-        return true;
-    }
-
-    public function buildToolResultMessage(string $toolCallId, string $toolName, mixed $result, bool $isError = false): array
-    {
-        return [
-            'role'         => 'tool',
-            'tool_call_id' => $toolCallId,
-            'content'      => is_string($result) ? $result : json_encode($result),
-        ];
-    }
-
-    public function buildAssistantToolCallMessage(?string $content, array $toolCalls): array
-    {
-        $openaiToolCalls = [];
-        foreach ($toolCalls as $tc) {
-            $openaiToolCalls[] = [
-                'id'       => $tc['id'],
-                'type'     => 'function',
-                'function' => [
-                    'name'      => $tc['name'],
-                    'arguments' => json_encode($tc['input'] ?? []),
-                ],
-            ];
-        }
-
-        return [
-            'role'       => 'assistant',
-            'content'    => $content,
-            'tool_calls' => $openaiToolCalls,
+            'finish_reason' => $finishReason,
         ];
     }
 

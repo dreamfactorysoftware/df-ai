@@ -86,29 +86,68 @@ class AnthropicProvider extends BaseAiProvider
         $maxTokens = $this->resolveMaxTokens($options);
         $temperature = $this->resolveTemperature($options);
 
-        // Extract system messages.
+        // Convert generic messages to Anthropic format.
+        // - System messages → extracted to top-level 'system' param
+        // - Assistant messages with tool_calls → content blocks with tool_use
+        // - Tool result messages (role:tool) → user message with tool_result content blocks
         $systemContent = null;
         $filteredMessages = [];
         foreach ($messages as $msg) {
-            if (($msg['role'] ?? '') === 'system') {
+            $role = $msg['role'] ?? '';
+
+            if ($role === 'system') {
                 $systemContent = ($systemContent ? $systemContent . "\n" : '') . ($msg['content'] ?? '');
-            } else {
-                $filteredMessages[] = $msg;
+                continue;
             }
+
+            if ($role === 'assistant' && !empty($msg['tool_calls'])) {
+                // Assistant message that includes tool_use requests.
+                $contentBlocks = [];
+                if (!empty($msg['content'])) {
+                    $contentBlocks[] = ['type' => 'text', 'text' => $msg['content']];
+                }
+                foreach ($msg['tool_calls'] as $tc) {
+                    $args = $tc['arguments'] ?? [];
+                    // Anthropic requires 'input' to be a JSON object (dict), never an array.
+                    $contentBlocks[] = [
+                        'type'  => 'tool_use',
+                        'id'    => $tc['id'] ?? '',
+                        'name'  => $tc['name'] ?? '',
+                        'input' => !empty($args) ? (object) $args : (object) [],
+                    ];
+                }
+                $filteredMessages[] = ['role' => 'assistant', 'content' => $contentBlocks];
+                continue;
+            }
+
+            if ($role === 'tool') {
+                // Tool result → Anthropic wants role:user with type:tool_result blocks.
+                // Merge consecutive tool results into one user message.
+                $toolResultBlock = [
+                    'type'        => 'tool_result',
+                    'tool_use_id' => $msg['tool_call_id'] ?? '',
+                    'content'     => $msg['content'] ?? '',
+                ];
+                // Check if the last filtered message is already a user tool_result message.
+                $lastIdx = count($filteredMessages) - 1;
+                if ($lastIdx >= 0
+                    && $filteredMessages[$lastIdx]['role'] === 'user'
+                    && is_array($filteredMessages[$lastIdx]['content'])
+                    && ($filteredMessages[$lastIdx]['content'][0]['type'] ?? '') === 'tool_result'
+                ) {
+                    $filteredMessages[$lastIdx]['content'][] = $toolResultBlock;
+                } else {
+                    $filteredMessages[] = ['role' => 'user', 'content' => [$toolResultBlock]];
+                }
+                continue;
+            }
+
+            // Regular user/assistant text messages.
+            $filteredMessages[] = ['role' => $role, 'content' => $msg['content'] ?? ''];
         }
 
         if ($this->systemPrompt) {
             $systemContent = $this->systemPrompt . ($systemContent ? "\n" . $systemContent : '');
-        }
-
-        // Convert tools to Anthropic format.
-        $anthropicTools = [];
-        foreach ($tools as $tool) {
-            $anthropicTools[] = [
-                'name'        => $tool['name'],
-                'description' => $tool['description'] ?? '',
-                'input_schema' => $tool['input_schema'] ?? ['type' => 'object', 'properties' => new \stdClass()],
-            ];
         }
 
         $payload = array_merge([
@@ -116,7 +155,7 @@ class AnthropicProvider extends BaseAiProvider
             'max_tokens'  => $maxTokens,
             'temperature' => $temperature,
             'messages'    => $filteredMessages,
-            'tools'       => $anthropicTools,
+            'tools'       => ToolDefinition::toAnthropicArray($tools),
         ], $this->extraParams);
 
         if ($systemContent) {
@@ -126,69 +165,25 @@ class AnthropicProvider extends BaseAiProvider
         $body = $this->request('POST', '/v1/messages', ['json' => $payload]);
 
         // Parse content blocks — may contain text and/or tool_use blocks.
-        $textContent = null;
-        $toolCalls = null;
-
+        $textParts = [];
+        $toolCalls = [];
         foreach ($body['content'] ?? [] as $block) {
-            if ($block['type'] === 'text') {
-                $textContent = ($textContent ?? '') . $block['text'];
-            } elseif ($block['type'] === 'tool_use') {
-                $toolCalls ??= [];
-                $toolCalls[] = [
-                    'id'    => $block['id'],
-                    'name'  => $block['name'],
-                    'input' => $block['input'] ?? [],
-                ];
+            if (($block['type'] ?? '') === 'text') {
+                $textParts[] = $block['text'];
+            } elseif (($block['type'] ?? '') === 'tool_use') {
+                $toolCalls[] = ToolCall::fromAnthropic($block)->toArray();
             }
         }
 
         return [
-            'content'       => $textContent,
-            'tool_calls'    => $toolCalls,
+            'content'       => !empty($textParts) ? implode('', $textParts) : null,
+            'tool_calls'    => !empty($toolCalls) ? $toolCalls : null,
             'provider'      => 'anthropic',
             'model'         => $body['model'] ?? $model,
             'input_tokens'  => $body['usage']['input_tokens'] ?? 0,
             'output_tokens' => $body['usage']['output_tokens'] ?? 0,
             'finish_reason' => $body['stop_reason'] ?? 'unknown',
         ];
-    }
-
-    public function supportsToolUse(): bool
-    {
-        return true;
-    }
-
-    public function buildToolResultMessage(string $toolCallId, string $toolName, mixed $result, bool $isError = false): array
-    {
-        return [
-            'role'    => 'user',
-            'content' => [
-                [
-                    'type'       => 'tool_result',
-                    'tool_use_id' => $toolCallId,
-                    'content'    => is_string($result) ? $result : json_encode($result),
-                    'is_error'   => $isError,
-                ],
-            ],
-        ];
-    }
-
-    public function buildAssistantToolCallMessage(?string $content, array $toolCalls): array
-    {
-        $blocks = [];
-        if ($content !== null && $content !== '') {
-            $blocks[] = ['type' => 'text', 'text' => $content];
-        }
-        foreach ($toolCalls as $tc) {
-            $blocks[] = [
-                'type'  => 'tool_use',
-                'id'    => $tc['id'],
-                'name'  => $tc['name'],
-                'input' => $tc['input'] ?? [],
-            ];
-        }
-
-        return ['role' => 'assistant', 'content' => $blocks];
     }
 
     public function listModels(): array

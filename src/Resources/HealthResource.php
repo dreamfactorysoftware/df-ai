@@ -63,6 +63,12 @@ class HealthResource extends BaseRestResource
                         'description' => 'Default model configured for this service.',
                         'example' => 'claude-sonnet-4-5-20250929',
                     ],
+                    'model_count' => [
+                        'type' => 'integer',
+                        'description' => 'Number of models available from the provider.',
+                        'example' => 42,
+                        'nullable' => true,
+                    ],
                     'latency_ms' => [
                         'type' => 'integer',
                         'description' => 'Round-trip latency in milliseconds.',
@@ -81,16 +87,16 @@ class HealthResource extends BaseRestResource
 
         $start = hrtime(true);
         $available = false;
+        $modelCount = null;
 
         try {
             $available = $provider->isAvailable();
 
-            // If available, do a lightweight test call to measure latency.
+            // Use listModels() for a lightweight connectivity check that
+            // doesn't consume any tokens (unlike the previous complete() call).
             if ($available) {
-                $provider->complete([
-                    'prompt'     => 'Hi',
-                    'max_tokens' => 5,
-                ]);
+                $models = $provider->listModels();
+                $modelCount = count($models);
             }
         } catch (\Throwable) {
             // Provider unreachable — we still report the status.
@@ -99,10 +105,11 @@ class HealthResource extends BaseRestResource
         $latencyMs = (int) ((hrtime(true) - $start) / 1_000_000);
 
         return [
-            'available'  => $available,
-            'provider'   => $provider->getProviderName(),
-            'model'      => $service->getConfig('default_model', ''),
-            'latency_ms' => $latencyMs,
+            'available'   => $available,
+            'provider'    => $provider->getProviderName(),
+            'model'       => $service->getConfig('default_model', ''),
+            'model_count' => $modelCount,
+            'latency_ms'  => $latencyMs,
         ];
     }
 }

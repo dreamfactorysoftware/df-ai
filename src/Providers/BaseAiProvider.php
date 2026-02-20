@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace DreamFactory\Core\AI\Providers;
 
+use DreamFactory\Core\AI\Exceptions\AiProviderException;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 /**
@@ -80,27 +82,90 @@ abstract class BaseAiProvider implements AiProviderInterface
         return (float) ($options['temperature'] ?? $this->defaultTemperature);
     }
 
+    /** Maximum number of retry attempts for retryable errors. */
+    protected int $maxRetries = 3;
+
+    /** Base delay in seconds for exponential backoff (doubles each attempt). */
+    protected float $retryBaseDelay = 1.0;
+
     /**
-     * Wrap a Guzzle call with consistent error handling.
+     * Wrap a Guzzle call with consistent error handling and retry logic.
+     *
+     * Retryable errors (429, 5xx, timeouts) are retried up to $maxRetries times
+     * with exponential backoff. Non-retryable errors (401, 403, 400, 422) throw
+     * immediately.
+     *
+     * @throws AiProviderException
      */
     protected function request(string $method, string $uri, array $options = []): array
     {
-        try {
-            $response = $this->client->request($method, $uri, $options);
-            $body = json_decode($response->getBody()->getContents(), true);
+        $lastException = null;
 
-            if (!is_array($body)) {
-                throw new RuntimeException('Provider returned non-JSON response');
+        for ($attempt = 1; $attempt <= $this->maxRetries; $attempt++) {
+            try {
+                $response = $this->client->request($method, $uri, $options);
+                $body = json_decode($response->getBody()->getContents(), true);
+
+                if (!is_array($body)) {
+                    throw new RuntimeException('Provider returned non-JSON response');
+                }
+
+                return $body;
+            } catch (GuzzleException $e) {
+                $lastException = AiProviderException::fromGuzzleException(
+                    $this->getProviderName(),
+                    $e,
+                );
+
+                if (!$lastException->isRetryable() || $attempt === $this->maxRetries) {
+                    throw $lastException;
+                }
+
+                $delay = $lastException->getRetryAfterSeconds()
+                    ?? $this->retryBaseDelay * (2 ** ($attempt - 1));
+
+                $this->logRetry($attempt, $delay, $lastException);
+
+                usleep((int) ($delay * 1_000_000));
             }
-
-            return $body;
-        } catch (GuzzleException $e) {
-            throw new RuntimeException(
-                sprintf('%s API request failed: %s', $this->getProviderName(), $e->getMessage()),
-                (int) $e->getCode(),
-                $e,
-            );
         }
+
+        // Should never reach here, but just in case
+        throw $lastException ?? new AiProviderException(
+            sprintf('%s: request failed after %d attempts', $this->getProviderName(), $this->maxRetries),
+        );
+    }
+
+    /**
+     * Log a retry attempt. Uses Laravel's Log facade when available,
+     * falls back to error_log for environments without Laravel.
+     */
+    protected function logRetry(int $attempt, float $delay, AiProviderException $exception): void
+    {
+        $message = sprintf(
+            'AI provider %s request failed (attempt %d/%d), retrying in %.1fs: %s',
+            $this->getProviderName(),
+            $attempt,
+            $this->maxRetries,
+            $delay,
+            $exception->getMessage(),
+        );
+
+        try {
+            Log::warning($message);
+        } catch (\Throwable) {
+            error_log($message);
+        }
+    }
+
+    /**
+     * Default chatWithTools implementation — throws if not supported.
+     */
+    public function chatWithTools(array $messages, array $tools, array $options = []): array
+    {
+        throw new \LogicException(
+            sprintf('Provider "%s" does not support tool/function calling.', $this->getProviderName())
+        );
     }
 
     /**

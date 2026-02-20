@@ -3,6 +3,7 @@
 namespace DreamFactory\Core\AI\Resources;
 
 use DreamFactory\Core\AI\Services\AiConnection;
+use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
@@ -139,20 +140,20 @@ class CompletionResource extends BaseRestResource
     protected function handlePOST()
     {
         $payload = $this->getPayloadData();
-        $prompt = $payload['prompt'] ?? null;
 
-        if (empty($prompt)) {
-            throw new BadRequestException('"prompt" is required.');
-        }
+        $this->validatePayload($payload);
 
         /** @var AiConnection $service */
         $service = $this->getService();
         $provider = $service->getProvider();
+
+        RateLimiter::check($service->getServiceId(), $provider->getProviderName());
+
         $start = hrtime(true);
 
         try {
             $result = $provider->complete([
-                'prompt'      => $prompt,
+                'prompt'      => $payload['prompt'],
                 'max_tokens'  => $payload['max_tokens'] ?? null,
                 'temperature' => $payload['temperature'] ?? null,
                 'model'       => $payload['model'] ?? null,
@@ -175,6 +176,44 @@ class CompletionResource extends BaseRestResource
                 $e->getMessage(),
             );
             throw $e;
+        }
+    }
+
+    /**
+     * Validate completion request payload.
+     *
+     * @throws BadRequestException
+     */
+    private function validatePayload(array $payload): void
+    {
+        $prompt = $payload['prompt'] ?? null;
+
+        if (!is_string($prompt) || trim($prompt) === '') {
+            throw new BadRequestException('"prompt" is required and must be a non-empty string.');
+        }
+
+        if (strlen($prompt) > 100_000) {
+            throw new BadRequestException('"prompt" exceeds the maximum length of 100,000 characters.');
+        }
+
+        if (isset($payload['max_tokens'])) {
+            $maxTokens = $payload['max_tokens'];
+            if (!is_int($maxTokens) && !is_numeric($maxTokens)) {
+                throw new BadRequestException('"max_tokens" must be a positive integer.');
+            }
+            if ((int) $maxTokens < 1) {
+                throw new BadRequestException('"max_tokens" must be a positive integer.');
+            }
+        }
+
+        if (isset($payload['temperature'])) {
+            $temp = $payload['temperature'];
+            if (!is_numeric($temp)) {
+                throw new BadRequestException('"temperature" must be a number between 0.0 and 2.0.');
+            }
+            if ((float) $temp < 0.0 || (float) $temp > 2.0) {
+                throw new BadRequestException('"temperature" must be between 0.0 and 2.0.');
+            }
         }
     }
 }

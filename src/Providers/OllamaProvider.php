@@ -96,6 +96,64 @@ class OllamaProvider extends BaseAiProvider
         ];
     }
 
+    public function chatWithTools(array $messages, array $tools, array $options = []): array
+    {
+        $model = $this->resolveModel($options);
+
+        if ($this->systemPrompt) {
+            $hasSystem = false;
+            foreach ($messages as $msg) {
+                if (($msg['role'] ?? '') === 'system') {
+                    $hasSystem = true;
+                    break;
+                }
+            }
+            if (!$hasSystem) {
+                array_unshift($messages, ['role' => 'system', 'content' => $this->systemPrompt]);
+            }
+        }
+
+        // Ollama v0.4+ supports OpenAI-compatible tool format.
+        $payload = array_merge([
+            'model'    => $model,
+            'messages' => $messages,
+            'stream'   => false,
+            'tools'    => ToolDefinition::toOpenAIArray($tools),
+            'options'  => [
+                'temperature' => $this->resolveTemperature($options),
+                'num_predict' => $this->resolveMaxTokens($options),
+            ],
+        ], $this->extraParams);
+
+        $body = $this->request('POST', '/api/chat', ['json' => $payload]);
+
+        if (!isset($body['message'])) {
+            throw new RuntimeException(
+                'Ollama returned unexpected response: ' . substr((string) json_encode($body), 0, 300)
+            );
+        }
+
+        $message = $body['message'];
+
+        $toolCalls = null;
+        if (!empty($message['tool_calls'])) {
+            $toolCalls = array_map(
+                fn(array $tc) => ToolCall::fromOpenAI($tc)->toArray(),
+                $message['tool_calls'],
+            );
+        }
+
+        return [
+            'content'       => $message['content'] ?? null,
+            'tool_calls'    => $toolCalls,
+            'provider'      => 'ollama',
+            'model'         => $body['model'] ?? $model,
+            'input_tokens'  => $body['prompt_eval_count'] ?? 0,
+            'output_tokens' => $body['eval_count'] ?? 0,
+            'finish_reason' => ($body['done'] ?? false) ? 'stop' : 'unknown',
+        ];
+    }
+
     public function listModels(): array
     {
         $body = $this->request('GET', '/api/tags');

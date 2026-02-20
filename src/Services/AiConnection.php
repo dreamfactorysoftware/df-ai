@@ -70,7 +70,7 @@ class AiConnection extends BaseRestService
             return $this->config;
         }
 
-        return array_get($this->config, $key, $default);
+        return data_get($this->config, $key, $default);
     }
 
     /**

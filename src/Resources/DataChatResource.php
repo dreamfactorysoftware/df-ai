@@ -4,395 +4,550 @@ declare(strict_types=1);
 
 namespace DreamFactory\Core\AI\Resources;
 
-use DreamFactory\Core\AI\DataChat\DataChatToolBuilder;
-use DreamFactory\Core\AI\DataChat\McpBridge;
-use DreamFactory\Core\AI\Services\AiConnection;
-use DreamFactory\Core\AI\Utility\UsageLogger;
+use DreamFactory\Core\AI\Models\AiConnectionConfig;
+use DreamFactory\Core\AI\Providers\AiProviderInterface;
+use DreamFactory\Core\AI\Providers\ToolDefinition;
+use DreamFactory\Core\Enums\ServiceTypeGroups;
+use DreamFactory\Core\Enums\VerbsMask;
 use DreamFactory\Core\Exceptions\BadRequestException;
+use DreamFactory\Core\Exceptions\ForbiddenException;
 use DreamFactory\Core\Exceptions\InternalServerErrorException;
-use DreamFactory\Core\Exceptions\NotFoundException;
+use DreamFactory\Core\Models\App;
+use DreamFactory\Core\Models\Role;
+use DreamFactory\Core\Models\RoleServiceAccess;
+use DreamFactory\Core\Models\User;
 use DreamFactory\Core\Resources\BaseRestResource;
-use Illuminate\Support\Facades\DB;
+use DreamFactory\Core\Services\ServiceManager;
+use DreamFactory\Core\Utility\JWTUtilities;
+use GuzzleHttp\Client;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Data Chat resource — agentic "chat with your data" via MCP tools.
+ * Stateless "Chat with Your Data" resource on the AI Connection service.
  *
- * GET  /api/v2/{service}/data-chat  — discover API keys and capabilities
- * POST /api/v2/{service}/data-chat  — send a chat message with tool execution
+ * Each AI service is configured with a single App (API key). That app's
+ * role determines which database services and tables the AI can access.
+ *
+ * GET  → returns config (role info, database services, tool support)
+ * POST → runs an agentic tool-calling loop and returns the response
  */
 class DataChatResource extends BaseRestResource
 {
-    const RESOURCE_NAME = 'data-chat';
+    public const RESOURCE_NAME = 'data-chat';
+
+    private const MAX_TOOL_ITERATIONS = 25;
+    private const TOOL_RESULT_MAX_LENGTH = 50000;
+
+    // ────────────────────────────────────────────────────────
+    // GET — return configuration for the chat UI
+    // ────────────────────────────────────────────────────────
 
     protected function handleGET(): array
     {
-        /** @var AiConnection $service */
-        $service = $this->getService();
-        $provider = $service->getProvider();
+        $config = $this->getAiConfig();
+        $app = $this->getConfiguredApp($config);
 
-        $apiKeys = $this->resolveApiKeyLabels($service);
-        $dbServices = $this->discoverDatabaseServices();
+        $supportsToolUse = false;
+        try {
+            $provider = $this->getService()->getProvider();
+            $supportsToolUse = method_exists($provider, 'chatWithTools');
+        } catch (\Throwable $e) {
+            // Provider couldn't be instantiated.
+        }
+
+        if (!$app) {
+            return [
+                'configured'       => false,
+                'supportsToolUse'  => $supportsToolUse,
+                'appName'          => null,
+                'roleName'         => null,
+                'databaseServices' => [],
+            ];
+        }
+
+        $role = Role::find($app->role_id);
+        $dbServices = $this->getDatabaseServicesForRole((int) $app->role_id);
 
         return [
-            'api_keys' => $apiKeys,
-            'supports_tool_use' => $provider->supportsToolUse(),
-            'database_services' => $dbServices,
+            'configured'       => true,
+            'supportsToolUse'  => $supportsToolUse,
+            'appName'          => $app->name,
+            'roleName'         => $role ? $role->name : "Role #{$app->role_id}",
+            'databaseServices' => $dbServices,
         ];
     }
+
+    // ────────────────────────────────────────────────────────
+    // POST — run the agentic chat loop
+    // ────────────────────────────────────────────────────────
 
     protected function handlePOST(): array
     {
         $payload = $this->getPayloadData();
-        $messages = $payload['messages'] ?? null;
 
+        $messages = $payload['messages'] ?? [];
         if (empty($messages) || !is_array($messages)) {
-            throw new BadRequestException('"messages" array is required.');
+            throw new BadRequestException('"messages" must be a non-empty array.');
         }
 
-        /** @var AiConnection $service */
+        // Resolve the single configured app.
+        $config = $this->getAiConfig();
+        $app = $this->getConfiguredApp($config);
+
+        if (!$app) {
+            throw new ForbiddenException(
+                'No API key is configured for this AI service. '
+                . 'An admin must select a Data Access API Key in the service configuration.'
+            );
+        }
+
+        $roleId = (int) $app->role_id;
+        $apiKey = $app->api_key;
+
+        // Generate a token for data access under this role.
+        $sessionToken = $this->generateTokenForRole($roleId, $app->id);
+
+        // Get the AI provider.
+        /** @var \DreamFactory\Core\AI\Services\AiConnection $service */
         $service = $this->getService();
         $provider = $service->getProvider();
 
-        if (!$provider->supportsToolUse()) {
-            throw new BadRequestException(
-                sprintf('Provider "%s" does not support tool use required for data chat.', $provider->getProviderName())
+        // Build tool definitions only for database services this role can access.
+        $dbServices = $this->getDatabaseServicesForRole($roleId);
+
+        if (empty($dbServices)) {
+            throw new ForbiddenException(
+                'The configured role has no access to any database services. '
+                . 'Assign database service permissions to this role first.'
             );
         }
 
-        $config = config('df-ai.data_chat', []);
-        $maxIterations = $config['max_iterations'] ?? 10;
-        $maxResultChars = $config['max_result_chars'] ?? 50000;
-        $mcpHost = $config['mcp_host'] ?? 'http://127.0.0.1:8006';
+        $tools = $this->buildTools($dbServices);
+        $systemPrompt = $this->buildSystemPrompt($dbServices);
 
-        // Resolve the API key to use.
-        $apiKeyIndex = (int) ($payload['api_key_index'] ?? 0);
-        $apiKey = $this->resolveApiKey($service, $apiKeyIndex);
-
-        // Get the session token from the current request for MCP auth.
-        $sessionToken = request()->header('X-DreamFactory-Session-Token')
-            ?? request()->query('session_token', '');
-
-        if (empty($sessionToken)) {
-            throw new BadRequestException('Session token is required for data chat.');
+        // Prepare messages for the provider.
+        $providerMessages = [['role' => 'system', 'content' => $systemPrompt]];
+        foreach ($messages as $msg) {
+            $providerMessages[] = [
+                'role'    => $msg['role'] ?? 'user',
+                'content' => $msg['content'] ?? '',
+            ];
         }
 
-        // Auto-discover database services accessible via the API key.
-        $dbServices = $this->discoverDatabaseServices();
-        if (empty($dbServices)) {
-            throw new BadRequestException('No database services found. Create a database service in DreamFactory first.');
-        }
-
-        $dfBaseUrl = config('app.url', 'http://localhost:8080');
-
-        // Create MCP bridge and discover tools.
-        $bridge = new McpBridge($sessionToken, $apiKey, $mcpHost, $dfBaseUrl);
-        $toolBuilder = new DataChatToolBuilder($bridge, $dbServices);
-
+        // Run the agentic loop.
+        $toolClient = $this->createToolClient($sessionToken, $apiKey);
         $start = hrtime(true);
-        $toolCallsLog = [];
+
+        return $this->runAgenticLoop(
+            $provider,
+            $providerMessages,
+            $tools,
+            $toolClient,
+            $dbServices,
+            $start,
+            $payload,
+        );
+    }
+
+    // ────────────────────────────────────────────────────────
+    // Agentic loop
+    // ────────────────────────────────────────────────────────
+
+    private function runAgenticLoop(
+        AiProviderInterface $provider,
+        array $messages,
+        array $tools,
+        array $toolClient,
+        array $dbServices,
+        int $startTime,
+        array $payload,
+    ): array {
         $totalInputTokens = 0;
         $totalOutputTokens = 0;
-        $iterations = 0;
+        $toolCallsMade = [];
+        $maxIterations = self::MAX_TOOL_ITERATIONS;
+
+        $options = [];
+        if (!empty($payload['model'])) {
+            $options['model'] = $payload['model'];
+        }
+        if (isset($payload['maxTokens'])) {
+            $options['max_tokens'] = (int) $payload['maxTokens'];
+        }
+        if (isset($payload['temperature'])) {
+            $options['temperature'] = (float) $payload['temperature'];
+        }
+
+        for ($iteration = 0; $iteration < $maxIterations; $iteration++) {
+            try {
+                $result = $provider->chatWithTools($messages, $tools, $options);
+            } catch (\LogicException $e) {
+                // Provider doesn't support tool calling — fall back to regular chat.
+                $result = [
+                    'content'       => $provider->chat($messages, $options)['content'] ?? '',
+                    'tool_calls'    => null,
+                    'finish_reason' => 'stop',
+                    'input_tokens'  => 0,
+                    'output_tokens' => 0,
+                ];
+            }
+
+            $totalInputTokens += $result['input_tokens'] ?? 0;
+            $totalOutputTokens += $result['output_tokens'] ?? 0;
+
+            // No tool calls — final response.
+            if (empty($result['tool_calls'])) {
+                $latencyMs = (int) ((hrtime(true) - $startTime) / 1_000_000);
+
+                return [
+                    'content'        => $result['content'] ?? '',
+                    'toolCallsMade'  => $toolCallsMade,
+                    'messages'       => $messages,
+                    'provider'       => $provider->getProviderName(),
+                    'model'          => $result['model'] ?? '',
+                    'inputTokens'    => $totalInputTokens,
+                    'outputTokens'   => $totalOutputTokens,
+                    'latencyMs'      => $latencyMs,
+                    'iterations'     => $iteration + 1,
+                ];
+            }
+
+            // AI wants to call tools — add assistant message.
+            $messages[] = [
+                'role'       => 'assistant',
+                'content'    => $result['content'],
+                'tool_calls' => $result['tool_calls'],
+            ];
+
+            // Execute each tool call.
+            foreach ($result['tool_calls'] as $toolCall) {
+                $toolStart = hrtime(true);
+                $toolResult = $this->executeTool($toolClient, $toolCall, $dbServices);
+                $toolDurationMs = (int) ((hrtime(true) - $toolStart) / 1_000_000);
+
+                $toolCallsMade[] = [
+                    'tool'          => $toolCall['name'] ?? '',
+                    'input'         => $toolCall['arguments'] ?? [],
+                    'outputPreview' => mb_substr($toolResult['content'], 0, 500),
+                    'isError'       => $toolResult['is_error'],
+                    'durationMs'    => $toolDurationMs,
+                ];
+
+                $messages[] = [
+                    'role'         => 'tool',
+                    'content'      => $toolResult['content'],
+                    'tool_call_id' => $toolCall['id'] ?? '',
+                ];
+            }
+        }
+
+        $latencyMs = (int) ((hrtime(true) - $startTime) / 1_000_000);
+
+        return [
+            'content'        => 'I reached the maximum number of data queries without producing a final answer. Please try a simpler question.',
+            'toolCallsMade'  => $toolCallsMade,
+            'messages'       => $messages,
+            'provider'       => $provider->getProviderName(),
+            'model'          => '',
+            'inputTokens'    => $totalInputTokens,
+            'outputTokens'   => $totalOutputTokens,
+            'latencyMs'      => $latencyMs,
+            'iterations'     => $maxIterations,
+        ];
+    }
+
+    // ────────────────────────────────────────────────────────
+    // Tool execution
+    // ────────────────────────────────────────────────────────
+
+    private function executeTool(array $toolClient, array $toolCall, array $dbServices): array
+    {
+        $toolName = $toolCall['name'] ?? '';
+        $args = $toolCall['arguments'] ?? [];
+
+        [$serviceName, $action] = $this->parseToolName($toolName);
+
+        if (!in_array($serviceName, $dbServices, true)) {
+            return [
+                'content'  => "Error: Service '{$serviceName}' is not available.",
+                'is_error' => true,
+            ];
+        }
 
         try {
-            $buildResult = $toolBuilder->build();
-            $tools = $buildResult['tools'];
-            $serviceMap = $buildResult['service_map'];
+            $data = $this->callDreamFactoryApi($toolClient, $serviceName, $action, $args);
+            $content = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
-            if (empty($tools)) {
-                throw new InternalServerErrorException('No tools available from MCP daemon. Is it running?');
+            if (strlen($content) > self::TOOL_RESULT_MAX_LENGTH) {
+                $content = substr($content, 0, self::TOOL_RESULT_MAX_LENGTH)
+                    . "\n...[TRUNCATED. Use filter/limit to narrow results.]";
             }
 
-            // Prepend system prompt with context.
-            $systemPrompt = $this->buildSystemPrompt($dbServices);
-            array_unshift($messages, ['role' => 'system', 'content' => $systemPrompt]);
-
-            $options = [
-                'max_tokens' => (int) ($payload['max_tokens'] ?? $config['default_max_tokens'] ?? 4096),
-                'temperature' => (float) ($payload['temperature'] ?? $config['default_temperature'] ?? 0.2),
-            ];
-            if (!empty($payload['model'])) {
-                $options['model'] = $payload['model'];
-            }
-
-            // Agentic loop.
-            $finalContent = null;
-            for ($i = 0; $i < $maxIterations; $i++) {
-                $iterations++;
-                $response = $provider->chatWithTools($messages, $tools, $options);
-
-                $totalInputTokens += $response['input_tokens'] ?? 0;
-                $totalOutputTokens += $response['output_tokens'] ?? 0;
-
-                // If no tool calls, we're done.
-                if (empty($response['tool_calls'])) {
-                    $finalContent = $response['content'];
-                    break;
-                }
-
-                // Append the assistant's tool_use message to the conversation.
-                $messages[] = $provider->buildAssistantToolCallMessage(
-                    $response['content'],
-                    $response['tool_calls'],
-                );
-
-                // Execute each tool call and append results.
-                foreach ($response['tool_calls'] as $toolCall) {
-                    $toolStart = hrtime(true);
-                    $prefixedName = $toolCall['name'];
-                    $isError = false;
-                    $resultContent = '';
-
-                    try {
-                        [$targetService, $originalTool] = DataChatToolBuilder::resolveToolCall($prefixedName, $serviceMap);
-
-                        if ($targetService === '_meta' && $originalTool === 'list_services') {
-                            $resultContent = $toolBuilder->getServicesList();
-                        } else {
-                            $result = $bridge->callTool($targetService, $originalTool, $toolCall['input'] ?? []);
-                            $resultContent = $result['content'] ?? '';
-                            $isError = $result['is_error'] ?? false;
-                        }
-
-                        // Truncate large results.
-                        if (strlen($resultContent) > $maxResultChars) {
-                            $resultContent = substr($resultContent, 0, $maxResultChars)
-                                . "\n\n[Result truncated at {$maxResultChars} characters]";
-                        }
-                    } catch (\Throwable $e) {
-                        $resultContent = 'Error: ' . $e->getMessage();
-                        $isError = true;
-                    }
-
-                    $toolDuration = (int) ((hrtime(true) - $toolStart) / 1_000_000);
-
-                    $toolCallsLog[] = [
-                        'tool' => $prefixedName,
-                        'input' => $toolCall['input'] ?? [],
-                        'output_preview' => substr($resultContent, 0, 500),
-                        'is_error' => $isError,
-                        'duration_ms' => $toolDuration,
-                    ];
-
-                    $messages[] = $provider->buildToolResultMessage(
-                        $toolCall['id'],
-                        $prefixedName,
-                        $resultContent,
-                        $isError,
-                    );
-                }
-            }
-
-            // If we hit max iterations without a final text response, note it.
-            if ($finalContent === null) {
-                $finalContent = '[Data chat reached maximum iterations without a final response. The AI may need a simpler question.]';
-            }
-
-            $latencyMs = (int) ((hrtime(true) - $start) / 1_000_000);
-
-            // Strip the system prompt we prepended before returning messages.
-            $returnMessages = array_values(array_filter($messages, function ($msg, $idx) {
-                return $idx > 0; // Skip the system prompt we added
-            }, ARRAY_FILTER_USE_BOTH));
-
-            $result = [
-                'content' => $finalContent,
-                'tool_calls_made' => $toolCallsLog,
-                'messages' => $returnMessages,
-                'provider' => $provider->getProviderName(),
-                'model' => $options['model'] ?? $service->getConfig('default_model', ''),
-                'input_tokens' => $totalInputTokens,
-                'output_tokens' => $totalOutputTokens,
-                'latency_ms' => $latencyMs,
-                'iterations' => $iterations,
-            ];
-
-            UsageLogger::logSuccess($service->getServiceId(), self::RESOURCE_NAME, [
-                'provider' => $result['provider'],
-                'model' => $result['model'],
-                'input_tokens' => $totalInputTokens,
-                'output_tokens' => $totalOutputTokens,
-            ], $latencyMs);
-
-            return $result;
+            return ['content' => $content, 'is_error' => false];
         } catch (\Throwable $e) {
-            $latencyMs = (int) ((hrtime(true) - $start) / 1_000_000);
-            UsageLogger::logError(
-                $service->getServiceId(),
-                self::RESOURCE_NAME,
-                $provider->getProviderName(),
-                $payload['model'] ?? $service->getConfig('default_model', ''),
-                $latencyMs,
-                $e->getMessage(),
+            Log::warning('DataChat tool error', [
+                'tool'  => $toolName,
+                'error' => $e->getMessage(),
+            ]);
+
+            return [
+                'content'  => 'Tool error: ' . $e->getMessage(),
+                'is_error' => true,
+            ];
+        }
+    }
+
+    private function callDreamFactoryApi(array $toolClient, string $service, string $action, array $args): array
+    {
+        /** @var Client $client */
+        $client = $toolClient['client'];
+        $baseUrl = $toolClient['baseUrl'];
+
+        $uri = match ($action) {
+            'get_tables'             => "/{$service}/_schema",
+            'get_table_schema'       => "/{$service}/_schema/" . urlencode($args['tableName'] ?? ''),
+            'get_table_data'         => "/{$service}/_table/" . urlencode($args['tableName'] ?? ''),
+            'get_table_fields'       => "/{$service}/_schema/" . urlencode($args['tableName'] ?? '') . "/_field",
+            'get_table_relationships'=> "/{$service}/_schema/" . urlencode($args['tableName'] ?? '') . "/_related",
+            'get_stored_procedures'  => "/{$service}/_proc",
+            'call_stored_procedure'  => "/{$service}/_proc/" . urlencode($args['procedureName'] ?? ''),
+            'get_stored_functions'   => "/{$service}/_func",
+            'call_stored_function'   => "/{$service}/_func/" . urlencode($args['functionName'] ?? ''),
+            default                  => throw new \RuntimeException("Unknown tool action: {$action}"),
+        };
+
+        $options = [];
+
+        if ($action === 'get_table_data') {
+            $query = [];
+            foreach (['fields', 'filter', 'limit', 'offset', 'order', 'group', 'related'] as $key) {
+                if (isset($args[$key]) && $args[$key] !== '' && $args[$key] !== null) {
+                    $query[$key] = is_array($args[$key]) ? implode(',', $args[$key]) : $args[$key];
+                }
+            }
+            foreach (['include_count', 'count_only'] as $key) {
+                if (!empty($args[$key])) {
+                    $query[$key] = 'true';
+                }
+            }
+            if (!empty($query)) {
+                $options['query'] = $query;
+            }
+        }
+
+        $method = 'GET';
+        if (in_array($action, ['call_stored_procedure', 'call_stored_function'])) {
+            $method = 'POST';
+            $options['json'] = $args['parameters'] ?? [];
+        }
+
+        $response = $client->request($method, $baseUrl . $uri, $options);
+        $body = json_decode($response->getBody()->getContents(), true);
+
+        return is_array($body) ? $body : [];
+    }
+
+    // ────────────────────────────────────────────────────────
+    // Tool definitions
+    // ────────────────────────────────────────────────────────
+
+    private function buildTools(array $dbServices): array
+    {
+        $tools = [];
+        foreach ($dbServices as $svc) {
+            $tools[] = new ToolDefinition(
+                name: "{$svc}__get_tables",
+                description: "List all tables available in the '{$svc}' database service.",
+                parameters: ['type' => 'object', 'properties' => new \stdClass(), 'required' => []],
             );
-            throw $e;
-        } finally {
-            $bridge->closeAll();
+            $tools[] = new ToolDefinition(
+                name: "{$svc}__get_table_schema",
+                description: "Get the full schema (columns, types, keys) for a table in '{$svc}'.",
+                parameters: [
+                    'type'       => 'object',
+                    'properties' => [
+                        'tableName' => ['type' => 'string', 'description' => 'Table name'],
+                    ],
+                    'required' => ['tableName'],
+                ],
+            );
+            $tools[] = new ToolDefinition(
+                name: "{$svc}__get_table_data",
+                description: "Query data from a table in '{$svc}'. Supports filtering, sorting, pagination, and field selection.",
+                parameters: [
+                    'type'       => 'object',
+                    'properties' => [
+                        'tableName'     => ['type' => 'string', 'description' => 'Table name'],
+                        'fields'        => ['type' => 'array', 'items' => ['type' => 'string'], 'description' => 'Columns to return'],
+                        'filter'        => ['type' => 'string', 'description' => 'SQL-style filter (e.g. "age > 30 AND city = \'NYC\')'],
+                        'order'         => ['type' => 'string', 'description' => 'Sort order (e.g. "created_at DESC")'],
+                        'limit'         => ['type' => 'integer', 'description' => 'Max rows to return (default 100)'],
+                        'offset'        => ['type' => 'integer', 'description' => 'Rows to skip (for pagination)'],
+                        'include_count' => ['type' => 'boolean', 'description' => 'Include total row count in response'],
+                        'count_only'    => ['type' => 'boolean', 'description' => 'Return only the count, no data'],
+                    ],
+                    'required' => ['tableName'],
+                ],
+            );
+            $tools[] = new ToolDefinition(
+                name: "{$svc}__get_table_fields",
+                description: "Get field definitions (column names, types, constraints) for a table in '{$svc}'.",
+                parameters: [
+                    'type'       => 'object',
+                    'properties' => [
+                        'tableName' => ['type' => 'string', 'description' => 'Table name'],
+                    ],
+                    'required' => ['tableName'],
+                ],
+            );
+            $tools[] = new ToolDefinition(
+                name: "{$svc}__get_table_relationships",
+                description: "Get relationship definitions (foreign keys, related tables) for a table in '{$svc}'.",
+                parameters: [
+                    'type'       => 'object',
+                    'properties' => [
+                        'tableName' => ['type' => 'string', 'description' => 'Table name'],
+                    ],
+                    'required' => ['tableName'],
+                ],
+            );
         }
+        return $tools;
     }
 
-    /**
-     * Get the raw API key string from the service config by index.
-     */
-    private function resolveApiKey(AiConnection $service, int $index): string
+    // ────────────────────────────────────────────────────────
+    // System prompt
+    // ────────────────────────────────────────────────────────
+
+    private function buildSystemPrompt(array $dbServices): string
     {
-        $keysJson = $service->getConfig('data_chat_api_keys', '');
-        $keys = [];
-
-        if (!empty($keysJson)) {
-            $keys = is_array($keysJson) ? $keysJson : (json_decode($keysJson, true) ?? []);
-        }
-
-        if (empty($keys)) {
-            throw new BadRequestException('No API keys configured for data chat. Add API keys in the AI service config.');
-        }
-
-        if (!isset($keys[$index])) {
-            throw new BadRequestException("Invalid api_key_index: {$index}. Available keys: 0-" . (count($keys) - 1));
-        }
-
-        return $keys[$index];
-    }
-
-    /**
-     * Resolve API keys to their app/role labels for the GET response.
-     */
-    private function resolveApiKeyLabels(AiConnection $service): array
-    {
-        $keysJson = $service->getConfig('data_chat_api_keys', '');
-        $keys = [];
-
-        if (!empty($keysJson)) {
-            $keys = is_array($keysJson) ? $keysJson : (json_decode($keysJson, true) ?? []);
-        }
-
-        $labels = [];
-        foreach ($keys as $index => $apiKey) {
-            $label = $this->lookupApiKeyLabel($apiKey);
-            $labels[] = [
-                'index' => $index,
-                'app_name' => $label['app_name'],
-                'role_name' => $label['role_name'],
-            ];
-        }
-
-        return $labels;
-    }
-
-    /**
-     * Look up the app name and role name for a DF API key.
-     */
-    private function lookupApiKeyLabel(string $apiKey): array
-    {
-        try {
-            $app = DB::table('app')
-                ->where('api_key', $apiKey)
-                ->first(['name', 'role_id']);
-
-            if (!$app) {
-                return ['app_name' => '(unknown app)', 'role_name' => '(unknown role)'];
-            }
-
-            $roleName = '(no role)';
-            if ($app->role_id) {
-                $role = DB::table('role')->where('id', $app->role_id)->first(['name']);
-                $roleName = $role->name ?? '(unknown role)';
-            }
-
-            return ['app_name' => $app->name, 'role_name' => $roleName];
-        } catch (\Throwable $e) {
-            Log::warning('DataChat: Failed to resolve API key label: ' . $e->getMessage());
-            return ['app_name' => '(error)', 'role_name' => '(error)'];
-        }
-    }
-
-    /** Database service types supported by MCP. */
-    private const DB_SERVICE_TYPES = [
-        'sqlite', 'mysql', 'pgsql', 'sqlsrv', 'oracle', 'ibmdb2', 'informix',
-        'sqlanywhere', 'firebird', 'mongodb', 'cassandra', 'couchdb',
-        'snowflake', 'bigquery', 'databricks', 'dremio', 'hana',
-        'memsql', 'mysqldb', 'mariadb',
-    ];
-
-    /**
-     * Discover database services available in this DreamFactory instance.
-     *
-     * @return string[] Service names
-     */
-    private function discoverDatabaseServices(): array
-    {
-        return DB::table('service')
-            ->whereIn('type', self::DB_SERVICE_TYPES)
-            ->where('is_active', true)
-            ->pluck('name')
-            ->toArray();
-    }
-
-    /**
-     * Build the system prompt for data chat.
-     */
-    private function buildSystemPrompt(array $services): string
-    {
-        $serviceList = implode(', ', $services);
-        $today = date('Y-m-d');
+        $serviceList = implode(', ', $dbServices);
 
         return <<<PROMPT
-You are a data analyst assistant. You help users query and understand their data using the available database tools.
+You are a data assistant with access to DreamFactory database tools.
 
-Today's date: {$today}
-Available database services: {$serviceList}
+Available data services: {$serviceList}
 
-## Rules
-1. Always check the schema (get_table_schema or get_tables) before querying data to understand column names and types.
-2. Use filters to narrow results instead of fetching all data.
-3. Never fabricate or assume data — only report what the tools return.
-4. If a query returns an error, explain it clearly and suggest how to fix the question.
-5. Use the limit parameter to avoid fetching too many rows (default to 100, max 1000).
-6. When counting records, use the countOnly parameter instead of fetching all records.
-7. Present results in clear, readable format (tables for structured data, summaries for aggregations).
-
-## DreamFactory Filter Syntax
-Filters use SQL-like syntax: `field operator value`
-- Comparison: =, !=, >, >=, <, <=
-- String: like, not like, starts with, ends with, contains
-- Null checks: is null, is not null
-- Logical: and, or
-- In list: in (val1,val2,val3)
-
-Examples:
-- `age > 30`
-- `status = 'active'`
-- `name like '%smith%'`
-- `created_at >= '2024-01-01' and status = 'active'`
-- `department in ('sales','marketing')`
+Guidelines:
+- Use get_tables and get_table_schema to understand the data structure before querying.
+- Always use LIMIT (default 100) to avoid returning excessively large result sets.
+- When presenting query results, format them clearly (tables, lists, or summaries).
+- If you encounter an error from a tool, explain it to the user and suggest alternatives.
+- Never access services not listed above.
 PROMPT;
     }
 
-    protected function getApiDocPaths(): array
-    {
-        $service = $this->getServiceName();
-        $capitalized = camelize($service);
+    // ────────────────────────────────────────────────────────
+    // Helpers
+    // ────────────────────────────────────────────────────────
 
-        return [
-            '/data-chat' => [
-                'get' => [
-                    'summary' => 'Get data chat configuration.',
-                    'description' => 'Returns available API keys (as app/role labels) and tool use support.',
-                    'operationId' => 'get' . $capitalized . 'DataChat',
-                    'responses' => [
-                        '200' => ['description' => 'Data chat configuration'],
-                    ],
-                ],
-                'post' => [
-                    'summary' => 'Send a data chat message.',
-                    'description' => 'Send a question about your data. The AI will use database tools to find the answer.',
-                    'operationId' => 'create' . $capitalized . 'DataChat',
-                    'responses' => [
-                        '200' => ['description' => 'Data chat response with tool calls and answer'],
-                    ],
-                ],
+    private function getAiConfig(): ?AiConnectionConfig
+    {
+        return AiConnectionConfig::whereServiceId($this->getServiceId())->first();
+    }
+
+    /**
+     * Get the single configured App from the AI service's app_id.
+     */
+    private function getConfiguredApp(?AiConnectionConfig $config): ?App
+    {
+        if (!$config || empty($config->app_id)) {
+            return null;
+        }
+
+        return App::where('id', $config->app_id)
+            ->where('is_active', true)
+            ->first();
+    }
+
+    private function parseToolName(string $prefixed): array
+    {
+        $pos = strpos($prefixed, '__');
+        if ($pos === false) {
+            return ['', $prefixed];
+        }
+        return [substr($prefixed, 0, $pos), substr($prefixed, $pos + 2)];
+    }
+
+    private function generateTokenForRole(int $roleId, int $appId): string
+    {
+        // The JWT just needs to identify a valid user — the API key's role
+        // (not the user's role) controls what data the AI can access.
+        // Find or create a dedicated AI agent user for internal API calls.
+        $user = User::where('email', 'ai-agent@system.local')->first();
+
+        if (!$user) {
+            // Auto-create the AI agent user on first use.
+            $user = User::create([
+                'name'         => 'AI Data Agent',
+                'email'        => 'ai-agent@system.local',
+                'password'     => \Hash::make(bin2hex(random_bytes(32))),
+                'is_active'    => true,
+                'is_sys_admin' => false,
+            ]);
+        }
+
+        return JWTUtilities::makeJWTByUser($user->id, $user->email);
+    }
+
+    private function createToolClient(string $sessionToken, string $apiKey): array
+    {
+        // Use http://localhost for internal calls — avoids APP_URL port issues in containers.
+        $baseUrl = 'http://localhost/api/v2';
+
+        $client = new Client([
+            'timeout' => 60,
+            'headers' => [
+                'Accept'                        => 'application/json',
+                'Content-Type'                  => 'application/json',
+                'X-DreamFactory-Session-Token'  => $sessionToken,
+                'X-DreamFactory-API-Key'        => $apiKey,
             ],
-        ];
+        ]);
+
+        return ['client' => $client, 'baseUrl' => $baseUrl];
+    }
+
+    /**
+     * Get database service names that a specific role has GET access to.
+     */
+    private function getDatabaseServicesForRole(int $roleId): array
+    {
+        /** @var ServiceManager $sm */
+        $sm = app('df.service');
+        $dbNames = $sm->getServiceNamesByGroup(ServiceTypeGroups::DATABASE, true);
+
+        if (empty($dbNames)) {
+            return [];
+        }
+
+        // getServiceNamesByGroup returns sequential array of names, not keyed by ID.
+        // Look up actual service IDs from the database.
+        $dbServiceMap = []; // service_id => name
+        foreach ($dbNames as $name) {
+            $svc = \DB::table('service')->where('name', $name)->first();
+            if ($svc) {
+                $dbServiceMap[(int) $svc->id] = $name;
+            }
+        }
+
+        $accessEntries = RoleServiceAccess::where('role_id', $roleId)->get();
+
+        // Check for wildcard access (service_id = null/0 means all services).
+        foreach ($accessEntries as $entry) {
+            if (empty($entry->service_id) && ($entry->verb_mask & VerbsMask::GET_MASK)) {
+                return array_values($dbServiceMap);
+            }
+        }
+
+        $allowed = [];
+        foreach ($accessEntries as $entry) {
+            $sid = (int) $entry->service_id;
+            if (isset($dbServiceMap[$sid]) && ($entry->verb_mask & VerbsMask::GET_MASK)) {
+                $allowed[$sid] = $dbServiceMap[$sid];
+            }
+        }
+
+        return array_values($allowed);
     }
 }

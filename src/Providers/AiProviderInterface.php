@@ -62,6 +62,31 @@ interface AiProviderInterface
     public function listModels(): array;
 
     /**
+     * Multi-turn chat with tool/function calling support.
+     *
+     * When tools are provided the model may return tool_calls instead of
+     * (or alongside) text content. The caller is responsible for executing
+     * the tool calls and sending the results back as tool-result messages.
+     *
+     * @param array<array{role: string, content: mixed}> $messages
+     * @param array<array{name: string, description: string, parameters: array}> $tools
+     * @param array{max_tokens?: int, temperature?: float, model?: string} $options
+     *
+     * @return array{
+     *     content: ?string,
+     *     tool_calls: ?array<array{id: string, name: string, arguments: array}>,
+     *     provider: string,
+     *     model: string,
+     *     input_tokens: int,
+     *     output_tokens: int,
+     *     finish_reason: string,
+     * }
+     *
+     * @throws \RuntimeException|\LogicException
+     */
+    public function chatWithTools(array $messages, array $tools, array $options = []): array;
+
+    /**
      * Generate text embeddings.
      *
      * @param string|array<string> $input

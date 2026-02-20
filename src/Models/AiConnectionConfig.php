@@ -23,7 +23,8 @@ class AiConnectionConfig extends BaseServiceConfigModel
         'rate_limit_rpm',
         'system_prompt',
         'allowed_models',
-        'data_chat_api_keys',
+        'allowed_roles',
+        'app_id',
     ];
 
     protected $casts = [
@@ -32,6 +33,7 @@ class AiConnectionConfig extends BaseServiceConfigModel
         'temperature'    => 'float',
         'timeout'        => 'integer',
         'rate_limit_rpm' => 'integer',
+        'app_id'         => 'integer',
     ];
 
     protected $encrypted = ['api_key', 'data_chat_api_keys'];
@@ -67,11 +69,11 @@ class AiConnectionConfig extends BaseServiceConfigModel
             case 'provider':
                 $schema['type'] = 'picklist';
                 $schema['values'] = [
-                    ['label' => 'Anthropic (Claude)',      'name' => 'anthropic'],
-                    ['label' => 'OpenAI (GPT)',            'name' => 'openai'],
-                    ['label' => 'xAI (Grok)',              'name' => 'xai'],
-                    ['label' => 'Ollama (Local)',           'name' => 'ollama'],
-                    ['label' => 'OpenAI-Compatible (Custom)', 'name' => 'openai_compatible'],
+                    ['label' => 'Anthropic (Claude)',           'name' => 'anthropic',        'default_base_url' => 'https://api.anthropic.com'],
+                    ['label' => 'OpenAI (GPT)',                 'name' => 'openai',           'default_base_url' => 'https://api.openai.com'],
+                    ['label' => 'xAI (Grok)',                   'name' => 'xai',              'default_base_url' => 'https://api.x.ai'],
+                    ['label' => 'Ollama (Local)',                'name' => 'ollama',           'default_base_url' => 'http://localhost:11434'],
+                    ['label' => 'OpenAI-Compatible (Custom)',    'name' => 'openai_compatible', 'default_base_url' => ''],
                 ];
                 $schema['label'] = 'AI Provider';
                 $schema['description'] = 'Select the AI/LLM provider to connect to.';
@@ -143,10 +145,16 @@ class AiConnectionConfig extends BaseServiceConfigModel
                 $schema['description'] = 'JSON array of allowed model IDs. Empty means all models are allowed. Example: ["claude-sonnet-4-5-20250929","claude-haiku-4-5-20251001"]';
                 break;
 
-            case 'data_chat_api_keys':
+            case 'allowed_roles':
                 $schema['type'] = 'text';
-                $schema['label'] = 'Data Chat API Keys';
-                $schema['description'] = 'JSON array of DreamFactory API keys for data chat. Each key is tied to an app with a role that controls what data the AI can access. Example: ["api-key-1","api-key-2"]';
+                $schema['label'] = 'Allowed Roles';
+                $schema['description'] = 'Deprecated. Use app_id instead.';
+                break;
+
+            case 'app_id':
+                $schema['type'] = 'integer';
+                $schema['label'] = 'Data Access API Key';
+                $schema['description'] = 'The DreamFactory API Key the AI uses for data access. The key\'s assigned role determines what data the AI can query.';
                 break;
         }
     }

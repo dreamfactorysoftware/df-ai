@@ -3,6 +3,7 @@
 namespace DreamFactory\Core\AI\Resources;
 
 use DreamFactory\Core\AI\Services\AiConnection;
+use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
@@ -160,19 +161,19 @@ class ChatResource extends BaseRestResource
     protected function handlePOST()
     {
         $payload = $this->getPayloadData();
-        $messages = $payload['messages'] ?? null;
 
-        if (empty($messages) || !is_array($messages)) {
-            throw new BadRequestException('"messages" array is required.');
-        }
+        $this->validatePayload($payload);
 
         /** @var AiConnection $service */
         $service = $this->getService();
         $provider = $service->getProvider();
+
+        RateLimiter::check($service->getServiceId(), $provider->getProviderName());
+
         $start = hrtime(true);
 
         try {
-            $result = $provider->chat($messages, [
+            $result = $provider->chat($payload['messages'], [
                 'max_tokens'  => $payload['max_tokens'] ?? null,
                 'temperature' => $payload['temperature'] ?? null,
                 'model'       => $payload['model'] ?? null,
@@ -195,6 +196,52 @@ class ChatResource extends BaseRestResource
                 $e->getMessage(),
             );
             throw $e;
+        }
+    }
+
+    private static array $validRoles = ['system', 'user', 'assistant'];
+
+    /**
+     * Validate chat request payload.
+     *
+     * @throws BadRequestException
+     */
+    private function validatePayload(array $payload): void
+    {
+        $messages = $payload['messages'] ?? null;
+
+        if (!is_array($messages) || empty($messages)) {
+            throw new BadRequestException('"messages" must be a non-empty array.');
+        }
+
+        foreach ($messages as $i => $message) {
+            if (!is_array($message)) {
+                throw new BadRequestException("messages[{$i}] must be an object with \"role\" and \"content\".");
+            }
+
+            $role = $message['role'] ?? null;
+            if (!is_string($role) || !in_array($role, self::$validRoles, true)) {
+                throw new BadRequestException(
+                    "messages[{$i}].role must be one of: " . implode(', ', self::$validRoles) . "."
+                );
+            }
+
+            $content = $message['content'] ?? null;
+            if (!is_string($content) || trim($content) === '') {
+                throw new BadRequestException("messages[{$i}].content must be a non-empty string.");
+            }
+        }
+
+        if (isset($payload['max_tokens'])) {
+            if (!is_numeric($payload['max_tokens']) || (int) $payload['max_tokens'] < 1) {
+                throw new BadRequestException('"max_tokens" must be a positive integer.');
+            }
+        }
+
+        if (isset($payload['temperature'])) {
+            if (!is_numeric($payload['temperature']) || (float) $payload['temperature'] < 0.0 || (float) $payload['temperature'] > 2.0) {
+                throw new BadRequestException('"temperature" must be between 0.0 and 2.0.');
+            }
         }
     }
 }
