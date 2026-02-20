@@ -23,6 +23,7 @@ class AiConnectionConfig extends BaseServiceConfigModel
         'rate_limit_rpm',
         'system_prompt',
         'allowed_models',
+        'data_chat_api_keys',
     ];
 
     protected $casts = [
@@ -33,9 +34,9 @@ class AiConnectionConfig extends BaseServiceConfigModel
         'rate_limit_rpm' => 'integer',
     ];
 
-    protected $encrypted = ['api_key'];
+    protected $encrypted = ['api_key', 'data_chat_api_keys'];
 
-    protected $protected = ['api_key'];
+    protected $protected = ['api_key', 'data_chat_api_keys'];
 
     /** Known providers with default base URLs. */
     protected static array $providerUrls = [
@@ -140,6 +141,12 @@ class AiConnectionConfig extends BaseServiceConfigModel
                 $schema['type'] = 'text';
                 $schema['label'] = 'Allowed Models';
                 $schema['description'] = 'JSON array of allowed model IDs. Empty means all models are allowed. Example: ["claude-sonnet-4-5-20250929","claude-haiku-4-5-20251001"]';
+                break;
+
+            case 'data_chat_api_keys':
+                $schema['type'] = 'text';
+                $schema['label'] = 'Data Chat API Keys';
+                $schema['description'] = 'JSON array of DreamFactory API keys for data chat. Each key is tied to an app with a role that controls what data the AI can access. Example: ["api-key-1","api-key-2"]';
                 break;
         }
     }

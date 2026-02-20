@@ -6,6 +6,7 @@ use DreamFactory\Core\AI\Providers\AiProviderFactory;
 use DreamFactory\Core\AI\Providers\AiProviderInterface;
 use DreamFactory\Core\AI\Resources\ChatResource;
 use DreamFactory\Core\AI\Resources\CompletionResource;
+use DreamFactory\Core\AI\Resources\DataChatResource;
 use DreamFactory\Core\AI\Resources\EmbeddingsResource;
 use DreamFactory\Core\AI\Resources\HealthResource;
 use DreamFactory\Core\AI\Resources\ModelsResource;
@@ -44,6 +45,11 @@ class AiConnection extends BaseRestService
             'name'       => UsageResource::RESOURCE_NAME,
             'class_name' => UsageResource::class,
             'label'      => 'Usage',
+        ],
+        DataChatResource::RESOURCE_NAME => [
+            'name'       => DataChatResource::RESOURCE_NAME,
+            'class_name' => DataChatResource::class,
+            'label'      => 'Data Chat',
         ],
     ];
 

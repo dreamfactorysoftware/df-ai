@@ -113,6 +113,32 @@ abstract class BaseAiProvider implements AiProviderInterface
         );
     }
 
+    public function chatWithTools(array $messages, array $tools, array $options = []): array
+    {
+        throw new \LogicException(
+            sprintf('Provider "%s" does not support tool use.', $this->getProviderName())
+        );
+    }
+
+    public function supportsToolUse(): bool
+    {
+        return false;
+    }
+
+    public function buildToolResultMessage(string $toolCallId, string $toolName, mixed $result, bool $isError = false): array
+    {
+        throw new \LogicException(
+            sprintf('Provider "%s" does not support tool use.', $this->getProviderName())
+        );
+    }
+
+    public function buildAssistantToolCallMessage(?string $content, array $toolCalls): array
+    {
+        throw new \LogicException(
+            sprintf('Provider "%s" does not support tool use.', $this->getProviderName())
+        );
+    }
+
     /**
      * Default isAvailable — checks that we have the minimum config.
      */
