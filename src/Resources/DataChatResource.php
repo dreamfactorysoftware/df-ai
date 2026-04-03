@@ -36,7 +36,11 @@ class DataChatResource extends BaseRestResource
 {
     public const RESOURCE_NAME = 'data-chat';
 
-    private const MAX_TOOL_ITERATIONS = 25;
+    /**
+     * Fallback cap used when the config key 'ai.data_chat.max_iterations' is absent
+     * or set to a non-positive value. The authoritative default lives in config/ai.php.
+     */
+    private const DEFAULT_MAX_TOOL_ITERATIONS = 10;
 
     /**
      * Roles accepted from caller-supplied messages.
@@ -138,8 +142,8 @@ class DataChatResource extends BaseRestResource
         $provider = $service->getProvider();
 
         // Throttle BEFORE the agentic loop fans out — each request can issue
-        // up to MAX_TOOL_ITERATIONS provider calls, so an unthrottled burst
-        // amplifies provider cost by 25x.
+        // up to DEFAULT_MAX_TOOL_ITERATIONS provider calls, so an unthrottled burst
+        // amplifies provider cost.
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
 
         // Build tool definitions only for database services this role can access.
@@ -195,7 +199,8 @@ class DataChatResource extends BaseRestResource
         $totalInputTokens = 0;
         $totalOutputTokens = 0;
         $toolCallsMade = [];
-        $maxIterations = self::MAX_TOOL_ITERATIONS;
+        $configured = (int) config('ai.data_chat.max_iterations', self::DEFAULT_MAX_TOOL_ITERATIONS);
+        $maxIterations = $configured > 0 ? $configured : self::DEFAULT_MAX_TOOL_ITERATIONS;
 
         $options = [];
         if (!empty($payload['model'])) {
