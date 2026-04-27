@@ -99,32 +99,6 @@ interface AiProviderInterface
     public function embeddings(string|array $input, array $options = []): array;
 
     /**
-     * Multi-turn chat with tool/function calling support.
-     *
-     * Messages may include tool results from previous iterations.
-     * The provider is responsible for translating the normalized tool
-     * format to its native API format.
-     *
-     * @param array $messages  Conversation messages (may include tool result messages)
-     * @param array $tools     Tool definitions in normalized format:
-     *                         [{name, description, input_schema: {type, properties, required}}]
-     * @param array $options   Same options as chat() plus tool-specific options
-     *
-     * @return array{
-     *     content: ?string,
-     *     tool_calls: ?array<array{id: string, name: string, input: array}>,
-     *     provider: string,
-     *     model: string,
-     *     input_tokens: int,
-     *     output_tokens: int,
-     *     finish_reason: string,
-     * }
-     *
-     * @throws \RuntimeException|\LogicException
-     */
-    public function chatWithTools(array $messages, array $tools, array $options = []): array;
-
-    /**
      * Whether this provider supports tool/function calling.
      */
     public function supportsToolUse(): bool;

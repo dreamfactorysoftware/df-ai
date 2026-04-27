@@ -178,13 +178,6 @@ abstract class BaseAiProvider implements AiProviderInterface
         );
     }
 
-    public function chatWithTools(array $messages, array $tools, array $options = []): array
-    {
-        throw new \LogicException(
-            sprintf('Provider "%s" does not support tool use.', $this->getProviderName())
-        );
-    }
-
     public function supportsToolUse(): bool
     {
         return false;
