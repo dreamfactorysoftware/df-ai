@@ -100,102 +100,23 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
         });
 
         // Org-wide usage aggregation across all AI Connections — powers the
-        // admin "AI Usage Analytics" dashboard.
+        // admin "AI Usage Analytics" dashboard. Heavy lifting in
+        // \DreamFactory\Core\AI\Utility\UsageAggregator (unit-tested).
         Route::middleware('df.auth_check')->get('_internal/ai/usage', function (Request $request) {
-                if (!Session::isSysAdmin()) {
-                    return response()->json(
-                        ['error' => ['message' => 'Admin access required.']],
-                        403
-                    );
-                }
+            if (!Session::isSysAdmin()) {
+                return response()->json(
+                    ['error' => ['message' => 'Admin access required.']],
+                    403
+                );
+            }
 
-                $period = $request->get('period', '7d');
-                $since = self::parsePeriodToCarbon($period);
+            $period = $request->get('period', '7d');
+            $since = \DreamFactory\Core\AI\Utility\UsageAggregator::parsePeriod($period);
+            $driver = \DB::connection()->getDriverName();
+            $result = \DreamFactory\Core\AI\Utility\UsageAggregator::aggregate($since, $driver);
+            $result['period'] = $period;
 
-                $base = \DreamFactory\Core\AI\Models\AiUsageLog::query()
-                    ->where('created_at', '>=', $since);
-
-                $totalRequests = (clone $base)->count();
-                $totalInput = (clone $base)->sum('input_tokens');
-                $totalOutput = (clone $base)->sum('output_tokens');
-                $errorCount = (clone $base)->where('status', 'error')->count();
-                $avgLatency = (clone $base)->avg('latency_ms');
-
-                $byService = (clone $base)
-                    ->selectRaw('service_id, COUNT(*) as requests, '
-                        . 'SUM(input_tokens) as input_tokens, '
-                        . 'SUM(output_tokens) as output_tokens, '
-                        . 'AVG(latency_ms) as avg_latency, '
-                        . 'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as errors', ['error'])
-                    ->groupBy('service_id')
-                    ->get();
-
-                $byUser = (clone $base)
-                    ->selectRaw('user_id, COUNT(*) as requests, '
-                        . 'SUM(input_tokens) as input_tokens, '
-                        . 'SUM(output_tokens) as output_tokens')
-                    ->groupBy('user_id')
-                    ->orderByDesc('requests')
-                    ->get();
-
-                $byRole = (clone $base)
-                    ->selectRaw('role_id, COUNT(*) as requests, '
-                        . 'SUM(input_tokens) as input_tokens, '
-                        . 'SUM(output_tokens) as output_tokens')
-                    ->groupBy('role_id')
-                    ->orderByDesc('requests')
-                    ->get();
-
-                $byProvider = (clone $base)
-                    ->selectRaw('provider, COUNT(*) as requests, '
-                        . 'SUM(input_tokens) as input_tokens, '
-                        . 'SUM(output_tokens) as output_tokens')
-                    ->groupBy('provider')
-                    ->get();
-
-                $byModel = (clone $base)
-                    ->selectRaw('model, provider, COUNT(*) as requests, '
-                        . 'SUM(input_tokens) as input_tokens, '
-                        . 'SUM(output_tokens) as output_tokens')
-                    ->groupBy('model', 'provider')
-                    ->orderByDesc('requests')
-                    ->get();
-
-                $byResource = (clone $base)
-                    ->selectRaw('resource, COUNT(*) as requests')
-                    ->groupBy('resource')
-                    ->get();
-
-                // Daily time series (date_format works on both MySQL and SQLite).
-                $driver = \DB::connection()->getDriverName();
-                $dateExpr = $driver === 'sqlite'
-                    ? "strftime('%Y-%m-%d', created_at)"
-                    : "DATE_FORMAT(created_at, '%Y-%m-%d')";
-                $series = (clone $base)
-                    ->selectRaw("$dateExpr as date, COUNT(*) as requests, "
-                        . 'SUM(input_tokens) as input_tokens, '
-                        . 'SUM(output_tokens) as output_tokens, '
-                        . 'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as errors', ['error'])
-                    ->groupBy(\DB::raw($dateExpr))
-                    ->orderBy(\DB::raw($dateExpr))
-                    ->get();
-
-                return response()->json([
-                    'period'              => $period,
-                    'since'               => $since->toIso8601String(),
-                    'total_requests'      => $totalRequests,
-                    'total_input_tokens'  => (int) $totalInput,
-                    'total_output_tokens' => (int) $totalOutput,
-                    'errors'              => $errorCount,
-                    'avg_latency_ms'      => (int) round((float) $avgLatency),
-                    'by_service'          => $byService,
-                    'by_user'             => $byUser,
-                    'by_role'             => $byRole,
-                    'by_provider'         => $byProvider,
-                    'by_model'            => $byModel,
-                    'by_resource'         => $byResource,
-                    'series'              => $series,
-                ]);
+            return response()->json($result);
         });
     }
 
