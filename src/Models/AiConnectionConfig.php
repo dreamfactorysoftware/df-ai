@@ -63,6 +63,32 @@ class AiConnectionConfig extends BaseServiceConfigModel
             if (empty($model->base_url) && isset(static::$providerUrls[$model->provider])) {
                 $model->base_url = static::$providerUrls[$model->provider];
             }
+
+            // Reject malformed model_rates rather than letting it silently fall
+            // through to per-service flat rates at log time (which would give
+            // misleading cost numbers without telling the admin why).
+            if (!empty($model->model_rates)) {
+                $decoded = json_decode((string) $model->model_rates, true);
+                if (!is_array($decoded)) {
+                    throw new \InvalidArgumentException(
+                        'model_rates must be valid JSON.'
+                    );
+                }
+                foreach ($decoded as $i => $row) {
+                    if (!is_array($row) || empty($row['model'])) {
+                        throw new \InvalidArgumentException(
+                            "model_rates[$i] requires a non-empty 'model' field."
+                        );
+                    }
+                    foreach (['input_per_1k', 'output_per_1k'] as $rateKey) {
+                        if (isset($row[$rateKey]) && !is_numeric($row[$rateKey])) {
+                            throw new \InvalidArgumentException(
+                                "model_rates[$i].$rateKey must be numeric."
+                            );
+                        }
+                    }
+                }
+            }
         });
     }
 

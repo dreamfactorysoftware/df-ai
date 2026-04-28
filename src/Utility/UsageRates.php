@@ -17,6 +17,10 @@ use DreamFactory\Core\AI\Models\AiConnectionConfig;
  * Configs are cached in a static map for the lifetime of the request — the
  * usage logger fires once per provider call, so repeated lookups within a
  * batched request hit the cache.
+ *
+ * The DB-touching `estimate()` is a thin wrapper over the pure
+ * `resolveRatesFromConfig()` / `costFor()` helpers below — those are the
+ * unit-testable surface (see tests/Unit/Utility/UsageRatesTest.php).
  */
 class UsageRates
 {
@@ -26,10 +30,12 @@ class UsageRates
     /**
      * Provider-level fallback rates (USD per 1k tokens). Mirrors
      * df-admin-interface/src/app/adf-ai-usage/utils/cost.ts so the dashboard's
-     * client-side estimates and the server-stored cost agree when no
+     * client-side what-if estimator and the server-stored cost agree when no
      * per-service rate is configured.
+     *
+     * @var array<string, array{input: float, output: float}>
      */
-    private const DEFAULT_RATES = [
+    public const DEFAULT_RATES = [
         'anthropic'         => ['input' => 0.003,  'output' => 0.015],
         'openai'            => ['input' => 0.0025, 'output' => 0.01],
         'xai'               => ['input' => 0.002,  'output' => 0.01],
@@ -44,20 +50,25 @@ class UsageRates
         int $inputTokens,
         int $outputTokens,
     ): float {
-        [$in, $out] = self::resolveRates($serviceId, $provider, $model);
-        return ($inputTokens / 1000) * $in + ($outputTokens / 1000) * $out;
+        [$in, $out] = self::resolveRatesFromConfig(
+            self::loadConfig($serviceId),
+            $provider,
+            $model
+        );
+        return self::costFor($inputTokens, $outputTokens, $in, $out);
     }
 
     /**
+     * Pure rate-resolution: given an optional config row and a request, walk
+     * per-model → per-service flat → DEFAULT_RATES. Exposed for unit tests.
+     *
      * @return array{0: float, 1: float} [inputPer1k, outputPer1k]
      */
-    private static function resolveRates(
-        int $serviceId,
+    public static function resolveRatesFromConfig(
+        ?AiConnectionConfig $config,
         string $provider,
         ?string $model,
     ): array {
-        $config = self::loadConfig($serviceId);
-
         if ($config) {
             $modelRates = self::parseModelRates($config->model_rates ?? null);
             if ($model && isset($modelRates[$model])) {
@@ -75,18 +86,30 @@ class UsageRates
         return [$default['input'], $default['output']];
     }
 
-    private static function loadConfig(int $serviceId): ?AiConnectionConfig
-    {
-        if (!array_key_exists($serviceId, self::$configCache)) {
-            self::$configCache[$serviceId] = AiConnectionConfig::where('service_id', $serviceId)->first();
-        }
-        return self::$configCache[$serviceId];
+    /**
+     * Pure cost math. Negative inputs are clamped to 0 — defensive against
+     * upstream provider bugs that emit nonsensical token counts.
+     */
+    public static function costFor(
+        int $inputTokens,
+        int $outputTokens,
+        float $inputPer1k,
+        float $outputPer1k,
+    ): float {
+        $in = max(0, $inputTokens);
+        $out = max(0, $outputTokens);
+        return ($in / 1000) * $inputPer1k + ($out / 1000) * $outputPer1k;
     }
 
     /**
+     * Decode the model_rates JSON column into a model-keyed lookup. Skips
+     * malformed rows silently — strict validation lives in
+     * AiConnectionConfig::saving so by the time we're reading, the column
+     * is well-formed. This is a final defense for older rows.
+     *
      * @return array<string, array{0: float, 1: float}>
      */
-    private static function parseModelRates(?string $raw): array
+    public static function parseModelRates(?string $raw): array
     {
         if (!$raw) {
             return [];
@@ -107,6 +130,14 @@ class UsageRates
             ];
         }
         return $rates;
+    }
+
+    private static function loadConfig(int $serviceId): ?AiConnectionConfig
+    {
+        if (!array_key_exists($serviceId, self::$configCache)) {
+            self::$configCache[$serviceId] = AiConnectionConfig::where('service_id', $serviceId)->first();
+        }
+        return self::$configCache[$serviceId];
     }
 
     /** Test/internal hook to drop the static cache (e.g. between integration runs). */
