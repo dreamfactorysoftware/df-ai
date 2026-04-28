@@ -113,7 +113,25 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
             $period = $request->get('period', '7d');
             $since = \DreamFactory\Core\AI\Utility\UsageAggregator::parsePeriod($period);
             $driver = \DB::connection()->getDriverName();
-            $result = \DreamFactory\Core\AI\Utility\UsageAggregator::aggregate($since, $driver);
+
+            // Each filter key may be sent as repeated query params (?service_id=1&service_id=2)
+            // or as a CSV (?provider=anthropic,openai). Normalize both shapes here so the
+            // aggregator only deals with arrays.
+            $filters = [];
+            foreach (\DreamFactory\Core\AI\Utility\UsageAggregator::FILTER_KEYS as $key) {
+                if (!$request->has($key)) {
+                    continue;
+                }
+                $raw = $request->get($key);
+                $values = is_array($raw)
+                    ? $raw
+                    : array_filter(array_map('trim', explode(',', (string) $raw)), fn($v) => $v !== '');
+                if (!empty($values)) {
+                    $filters[$key] = array_values($values);
+                }
+            }
+
+            $result = \DreamFactory\Core\AI\Utility\UsageAggregator::aggregate($since, $driver, $filters);
             $result['period'] = $period;
 
             return response()->json($result);

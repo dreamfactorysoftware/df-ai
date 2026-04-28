@@ -25,15 +25,20 @@ class AiConnectionConfig extends BaseServiceConfigModel
         'allowed_models',
         'allowed_roles',
         'app_id',
+        'cost_per_1k_input',
+        'cost_per_1k_output',
+        'model_rates',
     ];
 
     protected $casts = [
-        'service_id'     => 'integer',
-        'max_tokens'     => 'integer',
-        'temperature'    => 'float',
-        'timeout'        => 'integer',
-        'rate_limit_rpm' => 'integer',
-        'app_id'         => 'integer',
+        'service_id'         => 'integer',
+        'max_tokens'         => 'integer',
+        'temperature'        => 'float',
+        'timeout'            => 'integer',
+        'rate_limit_rpm'     => 'integer',
+        'app_id'             => 'integer',
+        'cost_per_1k_input'  => 'float',
+        'cost_per_1k_output' => 'float',
     ];
 
     protected $encrypted = ['api_key', 'data_chat_api_keys'];
@@ -155,6 +160,24 @@ class AiConnectionConfig extends BaseServiceConfigModel
                 $schema['type'] = 'integer';
                 $schema['label'] = 'Data Access API Key';
                 $schema['description'] = 'The DreamFactory API Key the AI uses for data access. The key\'s assigned role determines what data the AI can query.';
+                break;
+
+            case 'cost_per_1k_input':
+                $schema['type'] = 'number';
+                $schema['label'] = 'Default cost per 1k input tokens (USD)';
+                $schema['description'] = 'Optional. Used by the Gateway dashboard to compute cost. Falls back to provider defaults when blank. Per-model rates in the rate sheet below override this.';
+                break;
+
+            case 'cost_per_1k_output':
+                $schema['type'] = 'number';
+                $schema['label'] = 'Default cost per 1k output tokens (USD)';
+                $schema['description'] = 'Optional. Used by the Gateway dashboard to compute cost. Falls back to provider defaults when blank. Per-model rates in the rate sheet below override this.';
+                break;
+
+            case 'model_rates':
+                $schema['type'] = 'text';
+                $schema['label'] = 'Per-model rate sheet';
+                $schema['description'] = 'JSON array of per-model overrides. Each row: {"model":"gpt-4o","input_per_1k":0.0025,"output_per_1k":0.01}. Used to compute cost_usd at log-time. Most accurate when set.';
                 break;
         }
     }

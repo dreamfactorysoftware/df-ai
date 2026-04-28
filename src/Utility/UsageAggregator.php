@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DreamFactory\Core\AI\Utility;
 
 use DreamFactory\Core\AI\Models\AiUsageLog;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 
 /**
@@ -16,6 +17,18 @@ use Illuminate\Support\Carbon;
  */
 class UsageAggregator
 {
+    /** Filter keys accepted by aggregate(). Other keys are ignored. */
+    public const FILTER_KEYS = [
+        'provider',
+        'service_id',
+        'model',
+        'user_id',
+        'role_id',
+        'app_id',
+        'resource',
+        'status',
+    ];
+
     /**
      * Parse a period string like "24h", "7d", "30d", "90d" into a Carbon
      * timestamp representing the inclusive lower bound. Defaults to 7d.
@@ -38,14 +51,18 @@ class UsageAggregator
      *
      * @param Carbon $since lower-bound timestamp (inclusive)
      * @param string $driver DB driver name; controls SQL date-format syntax
+     * @param array<string, mixed> $filters keys from FILTER_KEYS; values are
+     *        scalar or array (treated as IN clause). Unknown keys ignored.
      */
-    public static function aggregate(Carbon $since, string $driver = 'mysql'): array
+    public static function aggregate(Carbon $since, string $driver = 'mysql', array $filters = []): array
     {
         $base = AiUsageLog::query()->where('created_at', '>=', $since);
+        self::applyFilters($base, $filters);
 
         $totalRequests = (clone $base)->count();
         $totalInput = (int) (clone $base)->sum('input_tokens');
         $totalOutput = (int) (clone $base)->sum('output_tokens');
+        $totalCostUsd = (float) (clone $base)->sum('cost_usd');
         $errorCount = (clone $base)->where('status', 'error')->count();
         $avgLatency = (int) round((float) (clone $base)->avg('latency_ms'));
 
@@ -54,6 +71,7 @@ class UsageAggregator
                 'service_id, COUNT(*) as requests, '
                 . 'SUM(input_tokens) as input_tokens, '
                 . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd, '
                 . 'AVG(latency_ms) as avg_latency, '
                 . 'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as errors',
                 ['error']
@@ -66,7 +84,8 @@ class UsageAggregator
             ->selectRaw(
                 'user_id, COUNT(*) as requests, '
                 . 'SUM(input_tokens) as input_tokens, '
-                . 'SUM(output_tokens) as output_tokens'
+                . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd'
             )
             ->groupBy('user_id')
             ->orderByDesc('requests')
@@ -77,9 +96,22 @@ class UsageAggregator
             ->selectRaw(
                 'role_id, COUNT(*) as requests, '
                 . 'SUM(input_tokens) as input_tokens, '
-                . 'SUM(output_tokens) as output_tokens'
+                . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd'
             )
             ->groupBy('role_id')
+            ->orderByDesc('requests')
+            ->get()
+            ->toArray();
+
+        $byApp = (clone $base)
+            ->selectRaw(
+                'app_id, COUNT(*) as requests, '
+                . 'SUM(input_tokens) as input_tokens, '
+                . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd'
+            )
+            ->groupBy('app_id')
             ->orderByDesc('requests')
             ->get()
             ->toArray();
@@ -88,7 +120,8 @@ class UsageAggregator
             ->selectRaw(
                 'provider, COUNT(*) as requests, '
                 . 'SUM(input_tokens) as input_tokens, '
-                . 'SUM(output_tokens) as output_tokens'
+                . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd'
             )
             ->groupBy('provider')
             ->get()
@@ -98,7 +131,8 @@ class UsageAggregator
             ->selectRaw(
                 'model, provider, COUNT(*) as requests, '
                 . 'SUM(input_tokens) as input_tokens, '
-                . 'SUM(output_tokens) as output_tokens'
+                . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd'
             )
             ->groupBy('model', 'provider')
             ->orderByDesc('requests')
@@ -117,6 +151,7 @@ class UsageAggregator
                 "$dateExpr as date, COUNT(*) as requests, "
                 . 'SUM(input_tokens) as input_tokens, '
                 . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd, '
                 . 'SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as errors',
                 ['error']
             )
@@ -130,16 +165,58 @@ class UsageAggregator
             'total_requests'      => $totalRequests,
             'total_input_tokens'  => $totalInput,
             'total_output_tokens' => $totalOutput,
+            'total_cost_usd'      => $totalCostUsd,
             'errors'              => $errorCount,
             'avg_latency_ms'      => $avgLatency,
             'by_service'          => $byService,
             'by_user'             => $byUser,
             'by_role'             => $byRole,
+            'by_app'              => $byApp,
             'by_provider'         => $byProvider,
             'by_model'            => $byModel,
             'by_resource'         => $byResource,
             'series'              => $series,
+            'filters'             => self::normalizeFiltersForResponse($filters),
         ];
+    }
+
+    /**
+     * Apply each known filter as an IN clause. Empty arrays / nulls /
+     * unknown keys are skipped. Mutates the query in place.
+     *
+     * @param array<string, mixed> $filters
+     */
+    private static function applyFilters(Builder $query, array $filters): void
+    {
+        foreach (self::FILTER_KEYS as $key) {
+            if (!array_key_exists($key, $filters)) {
+                continue;
+            }
+            $values = $filters[$key];
+            if ($values === null || $values === '' || $values === []) {
+                continue;
+            }
+            $query->whereIn($key, is_array($values) ? array_values($values) : [$values]);
+        }
+    }
+
+    /**
+     * Filter the response so it only echoes back keys we honored. Helps
+     * the UI sync chip state when "Other" / unknown params get dropped.
+     *
+     * @param array<string, mixed> $filters
+     * @return array<string, array<int, mixed>>
+     */
+    private static function normalizeFiltersForResponse(array $filters): array
+    {
+        $out = [];
+        foreach (self::FILTER_KEYS as $key) {
+            if (empty($filters[$key])) {
+                continue;
+            }
+            $out[$key] = is_array($filters[$key]) ? array_values($filters[$key]) : [$filters[$key]];
+        }
+        return $out;
     }
 
     /**
