@@ -7,6 +7,7 @@ namespace DreamFactory\Core\AI\Http\Controllers;
 use DreamFactory\Core\AI\Providers\AiProviderFactory;
 use DreamFactory\Core\AI\Utility\FilterRequestParser;
 use DreamFactory\Core\AI\Utility\UsageAggregator;
+use DreamFactory\Core\AI\Utility\UsageRates;
 use DreamFactory\Core\Http\Controllers\Controller;
 use DreamFactory\Core\Utility\Session;
 use Illuminate\Http\JsonResponse;
@@ -57,7 +58,9 @@ class InternalUsageController extends Controller
     /**
      * GET /_internal/ai/usage — org-wide AI usage aggregation. Powers the
      * Gateway dashboard's AI section. See UsageAggregator::FILTER_KEYS for
-     * the filter contract.
+     * the filter contract. Pass ?compare=1 to also include a `previous`
+     * block summarizing the immediately-preceding window of equal length —
+     * powers the period-over-period delta on each summary tile.
      */
     public function usage(Request $request): JsonResponse
     {
@@ -72,6 +75,19 @@ class InternalUsageController extends Controller
 
         $result = UsageAggregator::aggregate($since, $driver, $filters);
         $result['period'] = $period;
+        $result['budgets'] = UsageAggregator::budgetStatus();
+        $result['default_rates'] = UsageRates::defaultRatesForApi();
+
+        if ($request->boolean('compare')) {
+            // Previous window = same duration immediately before `since`.
+            // Use raw timestamp arithmetic; Carbon::diffInSeconds is signed in
+            // Carbon 3 and was getting the bounds backwards.
+            $now = \Illuminate\Support\Carbon::now();
+            $windowSeconds = max(1, $now->getTimestamp() - $since->getTimestamp());
+            $prevUntil = $since->copy();
+            $prevSince = $since->copy()->subSeconds($windowSeconds);
+            $result['previous'] = UsageAggregator::summarize($prevSince, $filters, $prevUntil);
+        }
 
         return response()->json($result);
     }

@@ -145,4 +145,23 @@ class UsageRates
     {
         self::$configCache = [];
     }
+
+    /**
+     * DEFAULT_RATES in API-friendly snake_case shape, for serving to the
+     * Gateway dashboard so the frontend doesn't need its own copy of the
+     * provider-default pricing table.
+     *
+     * @return array<string, array{input_per_1k: float, output_per_1k: float}>
+     */
+    public static function defaultRatesForApi(): array
+    {
+        $out = [];
+        foreach (self::DEFAULT_RATES as $provider => $rates) {
+            $out[$provider] = [
+                'input_per_1k'  => $rates['input'],
+                'output_per_1k' => $rates['output'],
+            ];
+        }
+        return $out;
+    }
 }

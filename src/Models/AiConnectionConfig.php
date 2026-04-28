@@ -28,6 +28,7 @@ class AiConnectionConfig extends BaseServiceConfigModel
         'cost_per_1k_input',
         'cost_per_1k_output',
         'model_rates',
+        'monthly_budget_usd',
     ];
 
     protected $casts = [
@@ -39,6 +40,7 @@ class AiConnectionConfig extends BaseServiceConfigModel
         'app_id'             => 'integer',
         'cost_per_1k_input'  => 'float',
         'cost_per_1k_output' => 'float',
+        'monthly_budget_usd' => 'float',
     ];
 
     protected $encrypted = ['api_key', 'data_chat_api_keys'];
@@ -204,6 +206,12 @@ class AiConnectionConfig extends BaseServiceConfigModel
                 $schema['type'] = 'text';
                 $schema['label'] = 'Per-model rate sheet';
                 $schema['description'] = 'Optional JSON array of per-model token prices. The most accurate way to track cost when one connection serves multiple model tiers (e.g. gpt-4o + gpt-4o-mini). Cost is computed and stored at log-time, so price changes do not rewrite history. Example: [{"model":"gpt-4o","input_per_1k":0.0025,"output_per_1k":0.01},{"model":"gpt-4o-mini","input_per_1k":0.00015,"output_per_1k":0.0006}]';
+                break;
+
+            case 'monthly_budget_usd':
+                $schema['type'] = 'number';
+                $schema['label'] = 'Monthly budget (USD)';
+                $schema['description'] = 'Optional spend cap for this connection per calendar month. The Gateway dashboard projects whether you will exceed it based on the current burn rate, and warns at the top of the page when a service is on track to overshoot. Does not block requests — purely a visibility tool.';
                 break;
         }
     }
