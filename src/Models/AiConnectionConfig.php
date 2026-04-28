@@ -107,103 +107,103 @@ class AiConnectionConfig extends BaseServiceConfigModel
                     ['label' => 'OpenAI-Compatible (Custom)',    'name' => 'openai_compatible', 'default_base_url' => ''],
                 ];
                 $schema['label'] = 'AI Provider';
-                $schema['description'] = 'Select the AI/LLM provider to connect to.';
+                $schema['description'] = 'Which LLM provider this AI Connection talks to. Each provider needs different credentials and endpoints — picking one auto-fills the Base URL.';
                 $schema['required'] = true;
                 break;
 
             case 'api_key':
                 $schema['type'] = 'password';
                 $schema['label'] = 'API Key';
-                $schema['description'] = 'Provider API key. Not required for Ollama (local).';
+                $schema['description'] = 'Provider API key (encrypted at rest). Anthropic, OpenAI, and xAI all require one. Ollama does not — it runs locally without auth. For OpenAI-Compatible endpoints, paste whatever bearer the server expects.';
                 break;
 
             case 'base_url':
                 $schema['label'] = 'Base URL';
-                $schema['description'] = 'API endpoint URL. Auto-filled for known providers (Anthropic, OpenAI, xAI, Ollama). Required for OpenAI-Compatible custom endpoints.';
+                $schema['description'] = 'Where this connection sends requests. Auto-filled when you pick a provider above. Override only for self-hosted endpoints, regional gateways, or proxies. OpenAI-Compatible providers must set this manually.';
                 break;
 
             case 'default_model':
                 $schema['label'] = 'Default Model';
-                $schema['description'] = 'Default model for requests (e.g., claude-sonnet-4-5-20250929, gpt-4o, grok-2, llama3.2). Can be overridden per request.';
+                $schema['description'] = 'Model used when a caller does not specify one. Examples: claude-sonnet-4-5, gpt-4o, gpt-4o-mini, grok-2, llama3.2. Each request can override this. If "Allowed Models" below is set, the default must be on that list.';
                 break;
 
             case 'max_tokens':
-                $schema['label'] = 'Max Tokens';
-                $schema['description'] = 'Default maximum tokens for AI responses. Can be overridden per request.';
+                $schema['label'] = 'Max output tokens';
+                $schema['description'] = 'Cap on the response length, in tokens. Does not limit the input. Each request can override. Set lower to control runaway responses; the API errors out if the model wants more.';
                 break;
 
             case 'temperature':
                 $schema['label'] = 'Temperature';
-                $schema['description'] = 'Default temperature (0.0 = deterministic, 1.0 = creative). Can be overridden per request.';
+                $schema['description'] = 'How random/creative responses are. 0 = deterministic, ~0.7 = balanced, 1.0 = creative. Anthropic accepts up to 1.0; OpenAI accepts up to 2.0. Each request can override.';
                 break;
 
             case 'organization_id':
                 $schema['label'] = 'Organization ID';
-                $schema['description'] = 'Optional. OpenAI organization ID, or other provider-specific identifier.';
+                $schema['description'] = 'Optional. OpenAI customers on a team plan use this to bill the right org. Most providers ignore it. Leave blank if you are not sure.';
                 break;
 
             case 'extra_headers':
                 $schema['type'] = 'object';
                 $schema['label'] = 'Extra Headers';
-                $schema['description'] = 'Additional HTTP headers to send with every request (JSON key-value pairs).';
+                $schema['description'] = 'JSON object of extra HTTP headers attached to every request. Common uses: pinning Anthropic API version ({"anthropic-version":"2023-06-01"}), passing Cloudflare access tokens, or routing through a corporate proxy.';
                 break;
 
             case 'extra_params':
                 $schema['type'] = 'object';
                 $schema['label'] = 'Extra Parameters';
-                $schema['description'] = 'Additional provider-specific parameters included in every request (JSON key-value pairs).';
+                $schema['description'] = 'JSON object merged into every request body. Use for provider-specific knobs DF does not surface explicitly (e.g. {"top_p":0.9} or {"reasoning":{"effort":"low"}}).';
                 break;
 
             case 'timeout':
                 $schema['label'] = 'Timeout (seconds)';
-                $schema['description'] = 'Request timeout in seconds.';
+                $schema['description'] = 'Abort the request if the provider has not responded in this many seconds. Bump higher for long completions or local Ollama models that warm up slowly.';
                 break;
 
             case 'rate_limit_rpm':
-                $schema['label'] = 'Rate Limit (RPM)';
-                $schema['description'] = 'Maximum requests per minute per user. 0 or empty for unlimited.';
+                $schema['label'] = 'Rate limit (requests per minute)';
+                $schema['description'] = 'Per-user cap on requests per minute through this connection. Stops a single user from blowing through your provider quota. 0 or blank = unlimited.';
                 break;
 
             case 'system_prompt':
                 $schema['type'] = 'text';
-                $schema['label'] = 'System Prompt';
-                $schema['description'] = 'Default system prompt prepended to all requests made through this connection.';
+                $schema['label'] = 'Default system prompt';
+                $schema['description'] = 'Instructions injected at the top of every conversation as the AI\'s persona/guardrails. Each request can append more, but cannot remove this. Use it to enforce tone, limit topics, or remind the model who it is talking to.';
                 break;
 
             case 'allowed_models':
                 $schema['type'] = 'text';
                 $schema['label'] = 'Allowed Models';
-                $schema['description'] = 'JSON array of allowed model IDs. Empty means all models are allowed. Example: ["claude-sonnet-4-5-20250929","claude-haiku-4-5-20251001"]';
+                $schema['description'] = 'Optional JSON array gating which model names callers can request. Empty = all models the provider exposes. Useful for cost control (block expensive models) or compliance (only approved models). Example: ["claude-sonnet-4-5","claude-haiku-4-5"]';
                 break;
 
             case 'allowed_roles':
                 $schema['type'] = 'text';
                 $schema['label'] = 'Allowed Roles';
-                $schema['description'] = 'Deprecated. Use app_id instead.';
+                $schema['description'] = 'Optional JSON array of DreamFactory role IDs that may call this connection. Empty = any authenticated user with access. This gates WHO can use the AI; the "Data Access API Key" below gates WHAT data the AI can read.';
                 break;
 
             case 'app_id':
                 $schema['type'] = 'integer';
                 $schema['label'] = 'Data Access API Key';
-                $schema['description'] = 'The DreamFactory API Key the AI uses for data access. The key\'s assigned role determines what data the AI can query.';
+                $schema['description'] = 'When the AI runs tools (read database, list files, etc.) it acts as this DreamFactory API key. The key\'s role determines which tables/services the AI can read. Create a least-privilege key for the AI — do not reuse a high-privilege admin key.';
                 break;
 
             case 'cost_per_1k_input':
                 $schema['type'] = 'number';
                 $schema['label'] = 'Default cost per 1k input tokens (USD)';
-                $schema['description'] = 'Optional. Used by the Gateway dashboard to compute cost. Falls back to provider defaults when blank. Per-model rates in the rate sheet below override this.';
+                $schema['description'] = 'Optional fallback rate used by the Gateway dashboard to compute spend. Per-model rates in the rate sheet below take priority. Leave blank to fall back to DreamFactory\'s built-in provider defaults.';
                 break;
 
             case 'cost_per_1k_output':
                 $schema['type'] = 'number';
                 $schema['label'] = 'Default cost per 1k output tokens (USD)';
-                $schema['description'] = 'Optional. Used by the Gateway dashboard to compute cost. Falls back to provider defaults when blank. Per-model rates in the rate sheet below override this.';
+                $schema['description'] = 'Optional fallback rate. Same lookup chain as input — per-model rates win, then this, then provider defaults. Output tokens usually cost 4-5× input tokens.';
                 break;
 
             case 'model_rates':
                 $schema['type'] = 'text';
                 $schema['label'] = 'Per-model rate sheet';
-                $schema['description'] = 'JSON array of per-model overrides. Each row: {"model":"gpt-4o","input_per_1k":0.0025,"output_per_1k":0.01}. Used to compute cost_usd at log-time. Most accurate when set.';
+                $schema['description'] = 'Optional JSON array of per-model token prices. The most accurate way to track cost when one connection serves multiple model tiers (e.g. gpt-4o + gpt-4o-mini). Cost is computed and stored at log-time, so price changes do not rewrite history. Example: [{"model":"gpt-4o","input_per_1k":0.0025,"output_per_1k":0.01},{"model":"gpt-4o-mini","input_per_1k":0.00015,"output_per_1k":0.0006}]';
                 break;
         }
     }
