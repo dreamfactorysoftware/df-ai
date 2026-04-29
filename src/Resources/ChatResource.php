@@ -2,11 +2,15 @@
 
 namespace DreamFactory\Core\AI\Resources;
 
+use DreamFactory\Core\AI\Providers\AiProviderInterface;
+use DreamFactory\Core\AI\Providers\Streaming\SseRelay;
 use DreamFactory\Core\AI\Services\AiConnection;
 use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ChatResource extends BaseRestResource
 {
@@ -170,6 +174,10 @@ class ChatResource extends BaseRestResource
 
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
 
+        if (!empty($payload['stream'])) {
+            return $this->handleStream($service, $provider, $payload);
+        }
+
         $start = hrtime(true);
 
         try {
@@ -197,6 +205,122 @@ class ChatResource extends BaseRestResource
             );
             throw $e;
         }
+    }
+
+    /**
+     * Streaming branch — opens an SSE response, drives the provider's
+     * chatStream() generator through SseRelay, and writes a single
+     * AiUsageLog row in a try/finally so partial disconnects still bill.
+     *
+     * Returns OpenAI-shape SSE frames regardless of upstream provider so
+     * any OpenAI-compatible SDK can consume the stream unchanged.
+     */
+    private function handleStream(AiConnection $service, AiProviderInterface $provider, array $payload): StreamedResponse
+    {
+        if (!$provider->supportsStreaming()) {
+            throw new BadRequestException(
+                sprintf('Provider "%s" does not support streaming.', $provider->getProviderName())
+            );
+        }
+
+        $model = $payload['model'] ?? $service->getConfig('default_model', '');
+        $chatId = 'chatcmpl-' . Str::random(24);
+        $serviceId = $service->getServiceId();
+        $providerName = $provider->getProviderName();
+        $start = hrtime(true);
+
+        $response = new StreamedResponse(function () use ($provider, $payload, $serviceId, $model, $providerName, $chatId, $start) {
+            $totals = null;
+            try {
+                $events = $provider->chatStream($payload['messages'], [
+                    'max_tokens'  => $payload['max_tokens'] ?? null,
+                    'temperature' => $payload['temperature'] ?? null,
+                    'model'       => $payload['model'] ?? null,
+                ]);
+
+                $totals = SseRelay::drive(
+                    $events,
+                    function (string $frame): bool {
+                        echo $frame;
+                        // ob_flush() may throw a notice if no buffer is
+                        // active; guard with @ since the Laravel test
+                        // harness can run without an output buffer.
+                        @ob_flush();
+                        flush();
+                        // If the client closed the connection, stop pulling
+                        // more bytes from the provider.
+                        return !connection_aborted();
+                    },
+                    $providerName,
+                    $model,
+                    $chatId,
+                );
+            } catch (\Throwable $e) {
+                // Provider couldn't even open the upstream stream — surface
+                // it inline as an error frame so SDK clients see something,
+                // and synthesize totals so the finally block can log it.
+                echo 'data: ' . json_encode(['error' => ['message' => $e->getMessage()]]) . "\n\n";
+                @ob_flush();
+                flush();
+                $totals = [
+                    'status'        => 'error',
+                    'input_tokens'  => 0,
+                    'output_tokens' => 0,
+                    'finish_reason' => null,
+                    'error_message' => $e->getMessage(),
+                ];
+            } finally {
+                // ALWAYS log — half-billed dropped streams are the worst
+                // class of billing bug a gateway can ship.
+                $latencyMs = (int) ((hrtime(true) - $start) / 1_000_000);
+                $totals = $totals ?? [
+                    'status'        => 'error',
+                    'input_tokens'  => 0,
+                    'output_tokens' => 0,
+                    'finish_reason' => null,
+                    'error_message' => 'streaming aborted before any totals were captured',
+                ];
+
+                $logShape = [
+                    'provider'      => $providerName,
+                    'model'         => $model,
+                    'input_tokens'  => $totals['input_tokens'],
+                    'output_tokens' => $totals['output_tokens'],
+                ];
+
+                if ($totals['status'] === 'success') {
+                    UsageLogger::logSuccess($serviceId, self::RESOURCE_NAME, $logShape, $latencyMs);
+                } elseif ($totals['status'] === 'partial') {
+                    UsageLogger::logPartial(
+                        $serviceId,
+                        self::RESOURCE_NAME,
+                        $logShape,
+                        $latencyMs,
+                        $totals['finish_reason'] ?? 'client_disconnect',
+                    );
+                } else {
+                    UsageLogger::logError(
+                        $serviceId,
+                        self::RESOURCE_NAME,
+                        $providerName,
+                        $model,
+                        $latencyMs,
+                        $totals['error_message'] ?? 'unknown streaming error',
+                    );
+                }
+            }
+        }, 200, [
+            'Content-Type'      => 'text/event-stream',
+            'Cache-Control'     => 'no-cache, no-transform',
+            'Connection'        => 'keep-alive',
+            // nginx-specific: disable proxy buffering so frames reach the
+            // client as they're emitted. Most other reverse proxies honor
+            // Cache-Control: no-transform, but X-Accel-Buffering is the
+            // belt-and-suspenders for nginx-fronted DF installs.
+            'X-Accel-Buffering' => 'no',
+        ]);
+
+        return $response;
     }
 
     private static array $validRoles = ['system', 'user', 'assistant'];

@@ -72,6 +72,10 @@ class UsageAggregator
         $totalOutput = (int) (clone $base)->sum('output_tokens');
         $totalCostUsd = (float) (clone $base)->sum('cost_usd');
         $errorCount = (clone $base)->where('status', 'error')->count();
+        // Partials = streaming requests where the client disconnected mid-
+        // generation. Billed but flagged separately so an uptick (usually
+        // network/load-balancer timeouts) doesn't hide inside the success rate.
+        $partialCount = (clone $base)->where('status', 'partial')->count();
         $avgLatency = (int) round((float) (clone $base)->avg('latency_ms'));
 
         // Cross-DB latency percentiles via offset/order. SQLite, MySQL, MSSQL,
@@ -195,6 +199,7 @@ class UsageAggregator
             'total_output_tokens' => $totalOutput,
             'total_cost_usd'      => $totalCostUsd,
             'errors'              => $errorCount,
+            'partials'            => $partialCount,
             'avg_latency_ms'      => $avgLatency,
             'latency_p50_ms'      => $latencyP50,
             'latency_p95_ms'      => $latencyP95,
@@ -286,6 +291,10 @@ class UsageAggregator
         $totalOutput = (int) (clone $base)->sum('output_tokens');
         $totalCostUsd = (float) (clone $base)->sum('cost_usd');
         $errorCount = (clone $base)->where('status', 'error')->count();
+        // Partials = streaming requests where the client disconnected mid-
+        // generation. Billed but flagged separately so an uptick (usually
+        // network/load-balancer timeouts) doesn't hide inside the success rate.
+        $partialCount = (clone $base)->where('status', 'partial')->count();
         $avgLatency = (int) round((float) (clone $base)->avg('latency_ms'));
 
         return [
@@ -296,6 +305,7 @@ class UsageAggregator
             'total_output_tokens' => $totalOutput,
             'total_cost_usd'      => $totalCostUsd,
             'errors'              => $errorCount,
+            'partials'            => $partialCount,
             'avg_latency_ms'      => $avgLatency,
             'latency_p50_ms'      => self::percentile(clone $base, 0.50, $totalRequests),
             'latency_p95_ms'      => self::percentile(clone $base, 0.95, $totalRequests),

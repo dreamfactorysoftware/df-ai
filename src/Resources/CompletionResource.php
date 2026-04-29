@@ -2,11 +2,15 @@
 
 namespace DreamFactory\Core\AI\Resources;
 
+use DreamFactory\Core\AI\Providers\AiProviderInterface;
+use DreamFactory\Core\AI\Providers\Streaming\SseRelay;
 use DreamFactory\Core\AI\Services\AiConnection;
 use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class CompletionResource extends BaseRestResource
 {
@@ -149,6 +153,10 @@ class CompletionResource extends BaseRestResource
 
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
 
+        if (!empty($payload['stream'])) {
+            return $this->handleStream($service, $provider, $payload);
+        }
+
         $start = hrtime(true);
 
         try {
@@ -177,6 +185,106 @@ class CompletionResource extends BaseRestResource
             );
             throw $e;
         }
+    }
+
+    /**
+     * Streaming branch — same shape as ChatResource::handleStream(), but
+     * the upstream call is `chatStream()` with the prompt wrapped in a
+     * single user message (mirrors how complete() builds its non-stream
+     * call). Provider's `complete()` doesn't have a streaming twin since
+     * the wire shape is identical to chat (prompt → one-message chat).
+     */
+    private function handleStream(AiConnection $service, AiProviderInterface $provider, array $payload): StreamedResponse
+    {
+        if (!$provider->supportsStreaming()) {
+            throw new BadRequestException(
+                sprintf('Provider "%s" does not support streaming.', $provider->getProviderName())
+            );
+        }
+
+        $messages = [['role' => 'user', 'content' => $payload['prompt']]];
+        $model = $payload['model'] ?? $service->getConfig('default_model', '');
+        $chatId = 'cmpl-' . Str::random(24);
+        $serviceId = $service->getServiceId();
+        $providerName = $provider->getProviderName();
+        $start = hrtime(true);
+
+        return new StreamedResponse(function () use ($provider, $payload, $messages, $serviceId, $model, $providerName, $chatId, $start) {
+            $totals = null;
+            try {
+                $events = $provider->chatStream($messages, [
+                    'max_tokens'  => $payload['max_tokens'] ?? null,
+                    'temperature' => $payload['temperature'] ?? null,
+                    'model'       => $payload['model'] ?? null,
+                ]);
+
+                $totals = SseRelay::drive(
+                    $events,
+                    function (string $frame): bool {
+                        echo $frame;
+                        @ob_flush();
+                        flush();
+                        return !connection_aborted();
+                    },
+                    $providerName,
+                    $model,
+                    $chatId,
+                );
+            } catch (\Throwable $e) {
+                echo 'data: ' . json_encode(['error' => ['message' => $e->getMessage()]]) . "\n\n";
+                @ob_flush();
+                flush();
+                $totals = [
+                    'status'        => 'error',
+                    'input_tokens'  => 0,
+                    'output_tokens' => 0,
+                    'finish_reason' => null,
+                    'error_message' => $e->getMessage(),
+                ];
+            } finally {
+                $latencyMs = (int) ((hrtime(true) - $start) / 1_000_000);
+                $totals = $totals ?? [
+                    'status'        => 'error',
+                    'input_tokens'  => 0,
+                    'output_tokens' => 0,
+                    'finish_reason' => null,
+                    'error_message' => 'streaming aborted before any totals were captured',
+                ];
+
+                $logShape = [
+                    'provider'      => $providerName,
+                    'model'         => $model,
+                    'input_tokens'  => $totals['input_tokens'],
+                    'output_tokens' => $totals['output_tokens'],
+                ];
+
+                if ($totals['status'] === 'success') {
+                    UsageLogger::logSuccess($serviceId, self::RESOURCE_NAME, $logShape, $latencyMs);
+                } elseif ($totals['status'] === 'partial') {
+                    UsageLogger::logPartial(
+                        $serviceId,
+                        self::RESOURCE_NAME,
+                        $logShape,
+                        $latencyMs,
+                        $totals['finish_reason'] ?? 'client_disconnect',
+                    );
+                } else {
+                    UsageLogger::logError(
+                        $serviceId,
+                        self::RESOURCE_NAME,
+                        $providerName,
+                        $model,
+                        $latencyMs,
+                        $totals['error_message'] ?? 'unknown streaming error',
+                    );
+                }
+            }
+        }, 200, [
+            'Content-Type'      => 'text/event-stream',
+            'Cache-Control'     => 'no-cache, no-transform',
+            'Connection'        => 'keep-alive',
+            'X-Accel-Buffering' => 'no',
+        ]);
     }
 
     /**

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DreamFactory\Core\AI\Providers;
 
+use DreamFactory\Core\AI\Providers\Streaming\SseFrameParser;
 use RuntimeException;
 
 /**
@@ -152,6 +153,98 @@ class OllamaProvider extends BaseAiProvider
             'output_tokens' => $body['eval_count'] ?? 0,
             'finish_reason' => ($body['done'] ?? false) ? 'stop' : 'unknown',
         ];
+    }
+
+    public function chatStream(array $messages, array $options = []): \Generator
+    {
+        $model = $this->resolveModel($options);
+
+        if ($this->systemPrompt) {
+            $hasSystem = false;
+            foreach ($messages as $msg) {
+                if (($msg['role'] ?? '') === 'system') {
+                    $hasSystem = true;
+                    break;
+                }
+            }
+            if (!$hasSystem) {
+                array_unshift($messages, ['role' => 'system', 'content' => $this->systemPrompt]);
+            }
+        }
+
+        $payload = array_merge([
+            'model'    => $model,
+            'messages' => $messages,
+            // Ollama streams when stream:true (and only then — defaults vary
+            // across versions, so set it explicitly).
+            'stream'   => true,
+            'options'  => [
+                'temperature' => $this->resolveTemperature($options),
+                'num_predict' => $this->resolveMaxTokens($options),
+            ],
+        ], $this->extraParams);
+
+        $stream = $this->streamGuzzle('POST', '/api/chat', ['json' => $payload]);
+
+        yield from self::translateOllamaStream(SseFrameParser::parseNdjson($stream));
+    }
+
+    public function supportsStreaming(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Translate Ollama's NDJSON chat stream into the unified event shape.
+     * Pure — exposed for unit testing.
+     *
+     * Ollama frames look like:
+     *   {"model":"...","message":{"role":"assistant","content":"hi"},"done":false}
+     *   ...
+     *   {"model":"...","done":true,"prompt_eval_count":4,"eval_count":7,"done_reason":"stop"}
+     *
+     * @param iterable<int, array<string, mixed>> $rows
+     * @return \Generator<int, array{type: string, ...}>
+     */
+    public static function translateOllamaStream(iterable $rows): \Generator
+    {
+        foreach ($rows as $row) {
+            // Some Ollama versions emit an `error` field on a streaming row
+            // when the model can't load.
+            if (!empty($row['error'])) {
+                yield ['type' => 'error', 'message' => (string) $row['error']];
+                return;
+            }
+
+            // Incremental content token (only when not done).
+            if (empty($row['done']) && isset($row['message']['content'])) {
+                $text = (string) $row['message']['content'];
+                if ($text !== '') {
+                    yield ['type' => 'delta', 'text' => $text];
+                }
+                continue;
+            }
+
+            // Terminal frame.
+            if (!empty($row['done'])) {
+                yield [
+                    'type'          => 'usage',
+                    'input_tokens'  => (int) ($row['prompt_eval_count'] ?? 0),
+                    'output_tokens' => (int) ($row['eval_count'] ?? 0),
+                ];
+                yield [
+                    'type'   => 'finish',
+                    'reason' => (string) ($row['done_reason'] ?? 'stop'),
+                ];
+                yield ['type' => 'done'];
+                return;
+            }
+        }
+
+        // Stream ended with no done:true frame — emit terminal sentinels so
+        // the resource layer can still close out billing.
+        yield ['type' => 'usage', 'input_tokens' => 0, 'output_tokens' => 0];
+        yield ['type' => 'done'];
     }
 
     public function listModels(): array

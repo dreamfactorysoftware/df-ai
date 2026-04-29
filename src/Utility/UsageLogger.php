@@ -36,6 +36,27 @@ class UsageLogger
     }
 
     /**
+     * Log a partially-delivered streaming request — the client disconnected
+     * (or the upstream dropped) before the model produced its final token.
+     *
+     * Bills for the tokens that were actually counted, but flags the row
+     * with status='partial' so dashboards can break it out from clean
+     * `success` totals (a wave of partials usually points at a network or
+     * timeout problem, not a model issue).
+     *
+     * @param array{provider?: string, model?: string, input_tokens?: int, output_tokens?: int, tool_call_count?: int} $result
+     */
+    public static function logPartial(
+        int $serviceId,
+        string $resource,
+        array $result,
+        int $latencyMs,
+        ?string $reason = null,
+    ): void {
+        self::write($serviceId, $resource, $result, $latencyMs, 'partial', $reason);
+    }
+
+    /**
      * Log a failed AI request.
      */
     public static function logError(
@@ -89,9 +110,11 @@ class UsageLogger
             $inputTokens = (int) ($result['input_tokens'] ?? 0);
             $outputTokens = (int) ($result['output_tokens'] ?? 0);
 
-            $costUsd = $status === 'success'
-                ? UsageRates::estimate($serviceId, $provider, $model, $inputTokens, $outputTokens)
-                : 0.0;
+            // Partial deliveries (streaming, client disconnect) still bill
+            // for the tokens we counted — only outright errors are zeroed.
+            $costUsd = $status === 'error'
+                ? 0.0
+                : UsageRates::estimate($serviceId, $provider, $model, $inputTokens, $outputTokens);
 
             AiUsageLog::create([
                 'service_id'      => $serviceId,

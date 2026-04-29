@@ -169,6 +169,51 @@ abstract class BaseAiProvider implements AiProviderInterface
     }
 
     /**
+     * Default chatStream implementation — throws if not supported.
+     *
+     * Subclasses that implement streaming override this and use
+     * {@see streamGuzzle()} to open the upstream connection.
+     */
+    public function chatStream(array $messages, array $options = []): \Generator
+    {
+        throw new \LogicException(
+            sprintf('Provider "%s" does not support streaming chat.', $this->getProviderName())
+        );
+        // Unreachable, but PHP requires `yield` for the method body to have
+        // a Generator return type — the throw above pre-empts execution.
+        yield;
+    }
+
+    public function supportsStreaming(): bool
+    {
+        return false;
+    }
+
+    /**
+     * Open a streaming Guzzle request and return the raw PSR-7 stream so
+     * the caller can iterate frames. NO retry logic here — streaming
+     * responses can't be safely replayed once bytes have been delivered to
+     * the upstream client, so the provider gets one shot.
+     *
+     * 4xx/5xx HTTP errors are caught and re-thrown as AiProviderException so
+     * resource code can log them through the existing error path.
+     *
+     * @param array $options Guzzle request options. `stream` is forced true.
+     *
+     * @throws AiProviderException
+     */
+    protected function streamGuzzle(string $method, string $uri, array $options = []): \Psr\Http\Message\StreamInterface
+    {
+        try {
+            $options['stream'] = true;
+            $response = $this->client->request($method, $uri, $options);
+            return $response->getBody();
+        } catch (GuzzleException $e) {
+            throw AiProviderException::fromGuzzleException($this->getProviderName(), $e);
+        }
+    }
+
+    /**
      * Default embeddings implementation — throws if not supported.
      */
     public function embeddings(string|array $input, array $options = []): array
