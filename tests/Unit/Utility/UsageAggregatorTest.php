@@ -113,4 +113,148 @@ class UsageAggregatorTest extends TestCase
             );
         }
     }
+
+    /**
+     * @return array<string, array{0: string, 1: string}>
+     */
+    public static function errorMessageProvider(): array
+    {
+        return [
+            'empty string'              => ['', 'unknown'],
+            'verbose timeout'           => ['cURL request timed out after 30s', 'timeout'],
+            'short timeout'             => ['Request timeout', 'timeout'],
+            '429 numeric'               => ['HTTP 429: Too Many Requests', 'rate_limit'],
+            'rate-limit hyphenated'     => ['Rate-limit exceeded for org', 'rate_limit'],
+            'rate limit spaced'         => ['You hit the rate limit, slow down', 'rate_limit'],
+            '401 numeric'               => ['HTTP 401 returned by provider', 'auth'],
+            '403 numeric'               => ['HTTP 403 forbidden', 'auth'],
+            'unauthorized prose'        => ['Unauthorized: bad token', 'auth'],
+            'invalid api key'           => ['Invalid API key supplied', 'auth'],
+            'authentication generic'    => ['Authentication failed', 'auth'],
+            'model not found 404'       => ['Model claude-foo: 404 not found', 'model_not_found'],
+            'model not found prose'     => ['model gpt-bar not found', 'model_not_found'],
+            'context length'            => ['Maximum context length 8192 exceeded', 'context_overflow'],
+            'too many tokens'           => ['too many tokens in prompt', 'context_overflow'],
+            'maximum context'           => ['Reached maximum context window', 'context_overflow'],
+            'connection refused'        => ['Connection refused on 127.0.0.1:8000', 'connectivity'],
+            'cannot connect'            => ['Cannot connect to host', 'connectivity'],
+            'dns resolution'            => ['Could not resolve host: api.example.com', 'connectivity'],
+            '500 server'                => ['HTTP 500 internal server error', 'provider_5xx'],
+            '503 server'                => ['HTTP 503 service unavailable', 'provider_5xx'],
+            '400 bad request'           => ['HTTP 400 bad request body', 'provider_4xx'],
+            '418 teapot'                => ['HTTP 418: i am a teapot', 'provider_4xx'],
+            'truly unknown'             => ['Something exploded inside the planet core', 'other'],
+        ];
+    }
+
+    /**
+     * @dataProvider errorMessageProvider
+     */
+    public function testClassifyErrorBucketsCommonFailureShapes(string $msg, string $expected): void
+    {
+        $this->assertSame(
+            $expected,
+            UsageAggregator::classifyError($msg),
+            "Expected '{$msg}' to classify as '{$expected}'"
+        );
+    }
+
+    public function testClassifyErrorIsCaseInsensitive(): void
+    {
+        // Providers vary on casing — the lowercase normalization in
+        // classifyError must keep the buckets stable.
+        $this->assertSame('timeout', UsageAggregator::classifyError('TIMEOUT during call'));
+        $this->assertSame('rate_limit', UsageAggregator::classifyError('Rate Limit hit'));
+        $this->assertSame('auth', UsageAggregator::classifyError('UNAUTHORIZED.'));
+    }
+
+    public function testClassifyErrorPriorityResolvesAmbiguity(): void
+    {
+        // A 429 message is bucketed as rate_limit, not provider_4xx, even
+        // though "429" matches the 4xx regex too — rate-limit detection runs
+        // before the generic 4xx fallthrough.
+        $this->assertSame(
+            'rate_limit',
+            UsageAggregator::classifyError('HTTP 429 too many requests')
+        );
+        // Same for 401 / 403 → auth, not provider_4xx.
+        $this->assertSame('auth', UsageAggregator::classifyError('HTTP 401 unauthorized'));
+        $this->assertSame('auth', UsageAggregator::classifyError('HTTP 403 forbidden'));
+        // 500 doesn't accidentally trip the 4xx bucket.
+        $this->assertSame('provider_5xx', UsageAggregator::classifyError('HTTP 500'));
+    }
+
+    public function testGroupErrorsReturnsEmptyForNoRows(): void
+    {
+        $this->assertSame([], UsageAggregator::groupErrors([], 0));
+        $this->assertSame([], UsageAggregator::groupErrors([], 5));   // total>0 but no rows sampled
+        $this->assertSame([], UsageAggregator::groupErrors([['error_message' => 'timeout']], 0));
+    }
+
+    public function testGroupErrorsCountsAndSortsByFrequency(): void
+    {
+        $rows = [
+            ['error_message' => 'cURL timed out'],
+            ['error_message' => 'cURL timed out'],
+            ['error_message' => 'cURL timed out'],
+            ['error_message' => 'HTTP 401 unauthorized'],
+            ['error_message' => 'HTTP 500 server error'],
+        ];
+
+        $out = UsageAggregator::groupErrors($rows, 5);
+
+        $this->assertSame(
+            [
+                ['class' => 'timeout', 'count' => 3],
+                ['class' => 'auth', 'count' => 1],
+                ['class' => 'provider_5xx', 'count' => 1],
+            ],
+            $out
+        );
+    }
+
+    public function testGroupErrorsScalesUpWhenSampleSmallerThanTotal(): void
+    {
+        // Mimic the aggregate() path: errors=1000 but only 100 sampled.
+        // Each bucketed count should scale up proportionally so the
+        // dashboard's pie chart matches the headline error count.
+        $rows = array_fill(0, 100, ['error_message' => 'cURL timed out']);
+        $out = UsageAggregator::groupErrors($rows, 1000);
+
+        $this->assertCount(1, $out);
+        $this->assertSame('timeout', $out[0]['class']);
+        $this->assertSame(1000, $out[0]['count']);
+    }
+
+    public function testGroupErrorsHandlesObjectShapedRows(): void
+    {
+        // The aggregate() path passes rows through Eloquent's ->toArray() so
+        // they're associative arrays, but the helper accepts stdClass too
+        // (older callers, raw selectRaw paths, etc.). Make sure we handle both.
+        $rows = [
+            (object) ['error_message' => 'HTTP 429 too many requests'],
+            (object) ['error_message' => 'HTTP 429 too many requests'],
+        ];
+
+        $out = UsageAggregator::groupErrors($rows, 2);
+
+        $this->assertSame([['class' => 'rate_limit', 'count' => 2]], $out);
+    }
+
+    public function testGroupErrorsHandlesNullErrorMessages(): void
+    {
+        // A row with status='error' but a null error_message bucket as
+        // 'unknown'. Defensive against rows from before error_message was a
+        // populated column.
+        $rows = [
+            ['error_message' => null],
+            ['error_message' => 'cURL timed out'],
+        ];
+
+        $out = UsageAggregator::groupErrors($rows, 2);
+        $byClass = array_column($out, 'count', 'class');
+
+        $this->assertSame(1, $byClass['unknown']);
+        $this->assertSame(1, $byClass['timeout']);
+    }
 }

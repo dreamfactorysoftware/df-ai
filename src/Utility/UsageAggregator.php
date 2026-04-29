@@ -335,7 +335,7 @@ class UsageAggregator
      * @param array<int, array{error_message: ?string}|object> $rows
      * @return array<int, array{class: string, count: int}>
      */
-    private static function groupErrors(array $rows, int $totalErrors): array
+    public static function groupErrors(array $rows, int $totalErrors): array
     {
         if (empty($rows) || $totalErrors === 0) {
             return [];
