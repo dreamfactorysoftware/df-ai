@@ -36,6 +36,25 @@ class InternalUsageController extends Controller
             'extra_headers', 'timeout',
         ]);
 
+        // When editing an existing AI Connection, the form doesn't redisplay
+        // saved secrets — so `api_key` arrives blank even though one is
+        // stored. If the form passes its `service_id`, fall back to the
+        // saved config for any field the form left empty. Lets admins click
+        // "Test Connection" without re-entering secrets every time.
+        $serviceId = $request->input('service_id');
+        if ($serviceId) {
+            $saved = \DreamFactory\Core\AI\Models\AiConnectionConfig::query()
+                ->where('service_id', (int) $serviceId)
+                ->first();
+            if ($saved) {
+                foreach (['provider', 'api_key', 'base_url', 'organization_id', 'extra_headers'] as $key) {
+                    if (empty($config[$key]) && !empty($saved->{$key})) {
+                        $config[$key] = $saved->{$key};
+                    }
+                }
+            }
+        }
+
         if (empty($config['provider'])) {
             return response()->json(['error' => ['message' => 'Provider is required.']], 422);
         }
