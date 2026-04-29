@@ -5,6 +5,7 @@ namespace DreamFactory\Core\AI;
 use DreamFactory\Core\AI\Commands\PrunePromptLogs;
 use DreamFactory\Core\AI\Commands\PruneUsageLogs;
 use DreamFactory\Core\AI\Http\Controllers\InternalUsageController;
+use DreamFactory\Core\AI\Http\Controllers\OpenAiCompatController;
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
 use DreamFactory\Core\AI\Services\AiConnection;
 use DreamFactory\Core\Enums\ServiceTypeGroups;
@@ -65,6 +66,14 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
             // events for Logstash http_poller / Splunk HTTP / Datadog
             // HTTP intake / any pull-based SIEM pipeline.
             Route::get('_internal/ai/audit-stream', [InternalUsageController::class, 'auditStream']);
+
+            // OpenAI-compatible drop-in endpoint. Customer apps point
+            // OPENAI_BASE_URL at /api/v2/_ai/v1 and they're done. Same
+            // RBAC + rate limits + audit + prompt-logging + fallback
+            // chains as native ChatResource — just routed via
+            // model-alias instead of explicit AI Connection name.
+            Route::post('api/v2/_ai/v1/chat/completions', [OpenAiCompatController::class, 'chatCompletions']);
+            Route::get('api/v2/_ai/v1/models', [OpenAiCompatController::class, 'listModels']);
         });
     }
 }

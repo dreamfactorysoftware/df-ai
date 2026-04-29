@@ -2,15 +2,21 @@
 
 namespace DreamFactory\Core\AI\Resources;
 
+use DreamFactory\Core\AI\Exceptions\AiProviderException;
 use DreamFactory\Core\AI\Providers\AiProviderInterface;
 use DreamFactory\Core\AI\Providers\Streaming\SseRelay;
 use DreamFactory\Core\AI\Services\AiConnection;
+use DreamFactory\Core\AI\Services\BudgetAlerter;
+use DreamFactory\Core\AI\Services\BudgetEnforcer;
+use DreamFactory\Core\AI\Services\FallbackChain;
 use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\AI\Utility\AuditDispatcher;
 use DreamFactory\Core\AI\Utility\PromptLogger;
 use DreamFactory\Core\AI\Utility\UsageLogger;
+use Illuminate\Support\Facades\Log;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
+use DreamFactory\Core\Utility\Session;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -176,10 +182,44 @@ class ChatResource extends BaseRestResource
 
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
 
+        // Pre-call budget check. Throws AiProviderException(429) when
+        // any matching hard-stop budget is at or above its cap. The
+        // attribution we pass is the request's CALLING context (admin
+        // user etc.); attribution attached to outbound provider calls
+        // is the same in the non-orchestrator path.
+        BudgetEnforcer::check(
+            $service->getServiceId(),
+            Session::getCurrentUserId(),
+            Session::getRoleId(),
+            Session::get('app.id'),
+        );
+
         if (!empty($payload['stream'])) {
             return $this->handleStream($service, $provider, $payload);
         }
 
+        // Walk the configured fallback chain on retryable provider errors
+        // (429 / 5xx / connection timeout). Each attempt writes its own
+        // ai_usage_log row so cost + latency stay attributable per-provider.
+        return FallbackChain::execute(
+            $service->getServiceId(),
+            fn(AiProviderInterface $attemptProvider, int $attemptServiceId, int $attemptIdx) =>
+                $this->dispatchChat($attemptProvider, $attemptServiceId, $attemptIdx, $payload),
+        );
+    }
+
+    /**
+     * Dispatch a single attempt against an AI Connection. On
+     * retryable failure, throws AiProviderException for FallbackChain
+     * to catch + try the next provider. On non-retryable failure,
+     * logs the error and re-throws.
+     */
+    private function dispatchChat(
+        AiProviderInterface $provider,
+        int $serviceId,
+        int $attemptIdx,
+        array $payload,
+    ): array {
         $start = hrtime(true);
 
         try {
@@ -192,13 +232,10 @@ class ChatResource extends BaseRestResource
             $latencyMs = (int) ((hrtime(true) - $start) / 1_000_000);
             $result['latency_ms'] = $latencyMs;
 
-            UsageLogger::logSuccess($service->getServiceId(), self::RESOURCE_NAME, $result, $latencyMs);
+            UsageLogger::logSuccess($serviceId, self::RESOURCE_NAME, $result, $latencyMs);
 
-            // Prompt + response audit (per-AI-Connection opt-in). The
-            // request_id from UsageLogger correlates the prompt log row
-            // back to the usage row for SIEM joins.
             PromptLogger::record(
-                $service->getServiceId(),
+                $serviceId,
                 self::RESOURCE_NAME,
                 $result['provider'] ?? '',
                 $result['model'] ?? '',
@@ -208,19 +245,30 @@ class ChatResource extends BaseRestResource
                 'success',
             );
 
-            // Push to configured SIEM sinks (webhook + file). No-op when
-            // the AI Connection has no sinks configured. Best-effort —
-            // failures don't break the response.
-            AuditDispatcher::dispatch($service->getServiceId(), UsageLogger::requestId());
+            AuditDispatcher::dispatch($serviceId, UsageLogger::requestId());
 
+            // Post-call budget threshold detection. Fires webhooks when
+            // a budget crosses 50/80/100% — once per threshold per period.
+            BudgetAlerter::afterCall(
+                $serviceId,
+                Session::getCurrentUserId(),
+                Session::getRoleId(),
+                Session::get('app.id'),
+            );
+
+            if ($attemptIdx > 0) {
+                Log::info("AI fallback attempt #{$attemptIdx} succeeded on service {$serviceId}", [
+                    'request_id' => UsageLogger::requestId(),
+                ]);
+            }
             return $result;
         } catch (\Throwable $e) {
             $latencyMs = (int) ((hrtime(true) - $start) / 1_000_000);
             UsageLogger::logError(
-                $service->getServiceId(),
+                $serviceId,
                 self::RESOURCE_NAME,
                 $provider->getProviderName(),
-                $payload['model'] ?? $service->getConfig('default_model', ''),
+                $payload['model'] ?? '',
                 $latencyMs,
                 $e->getMessage(),
             );
