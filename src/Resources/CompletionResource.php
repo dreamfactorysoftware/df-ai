@@ -6,6 +6,8 @@ use DreamFactory\Core\AI\Providers\AiProviderInterface;
 use DreamFactory\Core\AI\Providers\Streaming\SseRelay;
 use DreamFactory\Core\AI\Services\AiConnection;
 use DreamFactory\Core\AI\Services\RateLimiter;
+use DreamFactory\Core\AI\Utility\AuditDispatcher;
+use DreamFactory\Core\AI\Utility\PromptLogger;
 use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
@@ -171,6 +173,18 @@ class CompletionResource extends BaseRestResource
             $result['latency_ms'] = $latencyMs;
 
             UsageLogger::logSuccess($service->getServiceId(), self::RESOURCE_NAME, $result, $latencyMs);
+
+            PromptLogger::record(
+                $service->getServiceId(),
+                self::RESOURCE_NAME,
+                $result['provider'] ?? '',
+                $result['model'] ?? '',
+                (string) ($payload['prompt'] ?? ''),
+                (string) ($result['content'] ?? ''),
+                UsageLogger::requestId(),
+                'success',
+            );
+            AuditDispatcher::dispatch($service->getServiceId(), UsageLogger::requestId());
 
             return $result;
         } catch (\Throwable $e) {

@@ -6,6 +6,8 @@ use DreamFactory\Core\AI\Providers\AiProviderInterface;
 use DreamFactory\Core\AI\Providers\Streaming\SseRelay;
 use DreamFactory\Core\AI\Services\AiConnection;
 use DreamFactory\Core\AI\Services\RateLimiter;
+use DreamFactory\Core\AI\Utility\AuditDispatcher;
+use DreamFactory\Core\AI\Utility\PromptLogger;
 use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
@@ -191,6 +193,25 @@ class ChatResource extends BaseRestResource
             $result['latency_ms'] = $latencyMs;
 
             UsageLogger::logSuccess($service->getServiceId(), self::RESOURCE_NAME, $result, $latencyMs);
+
+            // Prompt + response audit (per-AI-Connection opt-in). The
+            // request_id from UsageLogger correlates the prompt log row
+            // back to the usage row for SIEM joins.
+            PromptLogger::record(
+                $service->getServiceId(),
+                self::RESOURCE_NAME,
+                $result['provider'] ?? '',
+                $result['model'] ?? '',
+                json_encode($payload['messages'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '',
+                (string) ($result['content'] ?? ''),
+                UsageLogger::requestId(),
+                'success',
+            );
+
+            // Push to configured SIEM sinks (webhook + file). No-op when
+            // the AI Connection has no sinks configured. Best-effort —
+            // failures don't break the response.
+            AuditDispatcher::dispatch($service->getServiceId(), UsageLogger::requestId());
 
             return $result;
         } catch (\Throwable $e) {

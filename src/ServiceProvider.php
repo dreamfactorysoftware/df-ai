@@ -2,6 +2,7 @@
 
 namespace DreamFactory\Core\AI;
 
+use DreamFactory\Core\AI\Commands\PrunePromptLogs;
 use DreamFactory\Core\AI\Commands\PruneUsageLogs;
 use DreamFactory\Core\AI\Http\Controllers\InternalUsageController;
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
@@ -46,7 +47,7 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
         $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
 
         if ($this->app->runningInConsole()) {
-            $this->commands([PruneUsageLogs::class]);
+            $this->commands([PruneUsageLogs::class, PrunePromptLogs::class]);
         }
     }
 
@@ -60,6 +61,10 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
         Route::middleware('df.auth_check')->group(function () {
             Route::post('_internal/ai/test-connection', [InternalUsageController::class, 'testConnection']);
             Route::get('_internal/ai/usage', [InternalUsageController::class, 'usage']);
+            // SIEM pull endpoint — NDJSON stream of ECS-shaped audit
+            // events for Logstash http_poller / Splunk HTTP / Datadog
+            // HTTP intake / any pull-based SIEM pipeline.
+            Route::get('_internal/ai/audit-stream', [InternalUsageController::class, 'auditStream']);
         });
     }
 }

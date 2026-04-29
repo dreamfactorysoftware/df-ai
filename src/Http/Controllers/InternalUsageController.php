@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DreamFactory\Core\AI\Http\Controllers;
 
 use DreamFactory\Core\AI\Providers\AiProviderFactory;
+use DreamFactory\Core\AI\Utility\AuditStreamFormatter;
 use DreamFactory\Core\AI\Utility\FilterRequestParser;
 use DreamFactory\Core\AI\Utility\UsageAggregator;
 use DreamFactory\Core\AI\Utility\UsageRates;
@@ -12,6 +13,8 @@ use DreamFactory\Core\Http\Controllers\Controller;
 use DreamFactory\Core\Utility\Session;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * Admin-only endpoints under /_internal/ai/* that don't fit the normal
@@ -109,5 +112,68 @@ class InternalUsageController extends Controller
         }
 
         return response()->json($result);
+    }
+
+    /**
+     * GET /_internal/ai/audit-stream
+     *
+     * Newline-delimited JSON (NDJSON) stream of ECS-shaped audit events
+     * for SIEM ingestion. Designed for Logstash's `http_poller` input
+     * plugin or any HTTP-pull pipeline (Datadog HTTP, Splunk's HTTP
+     * input, custom).
+     *
+     * Query params:
+     *   since   ISO-8601 timestamp (default: 5 minutes ago)
+     *   until   ISO-8601 timestamp (default: now)
+     *   limit   max events (default 1000, capped at 5000)
+     *
+     * The pull pattern is the simplest SIEM integration — a customer's
+     * SOC team configures their Logstash to poll this endpoint every
+     * minute with `since=<last_max_timestamp>`. They get every AI event
+     * including the redacted prompt content (when prompt logging is on
+     * for the source AI Connection).
+     *
+     * For push-based SIEM integration (Splunk HEC, Datadog logs, etc.)
+     * see {@see AuditDispatcher} which fires per-event webhooks.
+     *
+     * Auth: admin-only via Session::isSysAdmin(). Real deployments will
+     * want a service-account approach (long-lived API key for the SIEM)
+     * rather than session token; covered by the existing API key system.
+     */
+    public function auditStream(Request $request): StreamedResponse
+    {
+        if (!Session::isSysAdmin()) {
+            return new StreamedResponse(function () {
+                echo json_encode(['error' => ['message' => 'Admin access required.']]);
+            }, 403, ['Content-Type' => 'application/json']);
+        }
+
+        $sinceStr = (string) $request->get('since', '');
+        $untilStr = (string) $request->get('until', '');
+        $limit    = min(max((int) $request->get('limit', 1000), 1), 5000);
+
+        $since = $sinceStr !== ''
+            ? Carbon::parse($sinceStr)
+            : Carbon::now()->subMinutes(5);
+        $until = $untilStr !== '' ? Carbon::parse($untilStr) : null;
+
+        return new StreamedResponse(function () use ($since, $until, $limit) {
+            // Stream NDJSON: one JSON object per line, no enclosing array.
+            // Logstash's http_poller + json_lines codec consumes this
+            // directly. Same shape Splunk's HTTP input + json_no_brace
+            // sourcetype handles, and Datadog's HTTP intake.
+            foreach (AuditStreamFormatter::streamForWindow($since, $until, $limit) as $event) {
+                echo AuditStreamFormatter::toNdjsonLine($event), "\n";
+                @ob_flush();
+                flush();
+                if (connection_aborted()) {
+                    return;
+                }
+            }
+        }, 200, [
+            'Content-Type'      => 'application/x-ndjson',
+            'Cache-Control'     => 'no-cache, no-transform',
+            'X-Accel-Buffering' => 'no',
+        ]);
     }
 }
