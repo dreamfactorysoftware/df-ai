@@ -68,7 +68,7 @@ class AiProviderFactory
         if (empty($config) || empty($config['provider'] ?? null)) {
             $configModel = AiConnectionConfig::whereServiceId($service->getServiceId())->first();
             if ($configModel) {
-                $config = $configModel->toArray();
+                $config = self::configFromModel($configModel);
             }
         }
 
@@ -86,7 +86,58 @@ class AiProviderFactory
             throw new InvalidArgumentException("AI connection config not found for service ID: {$serviceId}");
         }
 
-        return self::make($configModel->toArray());
+        return self::make(self::configFromModel($configModel));
+    }
+
+    /**
+     * Build a make()-shaped config array from an AiConnectionConfig model.
+     *
+     * Both `toArray()` AND direct attribute access (`$model->api_key`) on
+     * AiConnectionConfig return the protectionMask "**********" by default
+     * because the model has `$protected = ['api_key', ...]` and inherits
+     * the Protectable trait's `$protectedView = true`. That mask is what
+     * gets shipped over the admin API so secrets don't leak. But when WE
+     * are inside DreamFactory wiring up an outbound provider call, we
+     * obviously need the plaintext.
+     *
+     * Setting `$protectedView = false` on the model instance disables the
+     * mask for the duration of this call. ServiceManager does the same on
+     * line 761 when it hydrates services for internal request handling —
+     * which is why the direct ChatResource path works without this fix
+     * (it goes through service hydration) and the df-ai-chat path didn't
+     * (it loaded the model directly from the DB).
+     *
+     * Anything package-internal that needs to construct a provider should
+     * route through here rather than touching the model directly, so the
+     * "which attributes does the factory need + how to unmask them"
+     * contract lives in one place.
+     *
+     * @return array<string, mixed>
+     */
+    private static function configFromModel(AiConnectionConfig $model): array
+    {
+        // Disable masking so api_key comes through as plaintext for the
+        // outbound provider call. This is an internal package boundary —
+        // the unmasked config never leaves this method.
+        $previousView = $model->protectedView;
+        $model->protectedView = false;
+        try {
+            return [
+                'provider'         => $model->provider,
+                'base_url'         => $model->base_url,
+                'api_key'          => $model->api_key,
+                'default_model'    => $model->default_model,
+                'max_tokens'       => $model->max_tokens,
+                'temperature'      => $model->temperature,
+                'timeout'          => $model->timeout,
+                'system_prompt'    => $model->system_prompt,
+                'organization_id'  => $model->organization_id,
+                'extra_headers'    => $model->extra_headers,
+                'extra_params'     => $model->extra_params,
+            ];
+        } finally {
+            $model->protectedView = $previousView;
+        }
     }
 
     private static function defaultUrl(string $provider): string
