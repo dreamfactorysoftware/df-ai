@@ -257,4 +257,136 @@ class UsageAggregatorTest extends TestCase
         $this->assertSame(1, $byClass['unknown']);
         $this->assertSame(1, $byClass['timeout']);
     }
+
+    // ─── attachCostPerThousand ────────────────────────────────────────────
+
+    public function testAttachCostPerThousandComputesEffectiveRate(): void
+    {
+        $rows = [
+            // 100 input + 50 output = 150 tokens, $0.001 cost
+            // → $0.001 / 150 × 1000 = $0.006667/1k
+            ['model' => 'gpt-4o', 'input_tokens' => 100, 'output_tokens' => 50, 'cost_usd' => 0.001],
+        ];
+        $out = UsageAggregator::attachCostPerThousand($rows);
+
+        $this->assertEqualsWithDelta(0.006667, $out[0]['cost_per_1k_tokens'], 1e-6);
+    }
+
+    public function testAttachCostPerThousandHandlesZeroTokens(): void
+    {
+        // A row with no tokens (e.g. a streaming row whose stream died
+        // before any usage chunk). Don't divide by zero — return 0.0.
+        $rows = [
+            ['model' => 'qwen', 'input_tokens' => 0, 'output_tokens' => 0, 'cost_usd' => 0.0],
+        ];
+        $out = UsageAggregator::attachCostPerThousand($rows);
+
+        $this->assertSame(0.0, $out[0]['cost_per_1k_tokens']);
+    }
+
+    public function testAttachCostPerThousandHandlesZeroCost(): void
+    {
+        // Local LLMs (Ollama) with 0 default rate — cost_per_1k should be 0,
+        // not error.
+        $rows = [
+            ['model' => 'ollama/llama3', 'input_tokens' => 200, 'output_tokens' => 80, 'cost_usd' => 0.0],
+        ];
+        $out = UsageAggregator::attachCostPerThousand($rows);
+
+        $this->assertSame(0.0, $out[0]['cost_per_1k_tokens']);
+    }
+
+    public function testAttachCostPerThousandPreservesAllOriginalFields(): void
+    {
+        $rows = [
+            ['model' => 'gpt-4o', 'provider' => 'openai', 'input_tokens' => 1000, 'output_tokens' => 500, 'cost_usd' => 0.0125, 'requests' => 4],
+        ];
+        $out = UsageAggregator::attachCostPerThousand($rows);
+
+        $this->assertSame('gpt-4o', $out[0]['model']);
+        $this->assertSame('openai', $out[0]['provider']);
+        $this->assertSame(4, $out[0]['requests']);
+        // Sanity: 1500 tokens at 0.0125 cost = $0.008333/1k
+        $this->assertEqualsWithDelta(0.008333, $out[0]['cost_per_1k_tokens'], 1e-6);
+    }
+
+    public function testAttachCostPerThousandAcceptsObjectRows(): void
+    {
+        // Eloquent's selectRaw returns stdClass — must accept those too.
+        $rows = [
+            (object) ['model' => 'claude', 'input_tokens' => 500, 'output_tokens' => 500, 'cost_usd' => 0.005],
+        ];
+        $out = UsageAggregator::attachCostPerThousand($rows);
+
+        $this->assertIsArray($out[0], 'output rows are normalized to arrays');
+        $this->assertEqualsWithDelta(0.005, $out[0]['cost_per_1k_tokens'], 1e-6);
+    }
+
+    public function testAttachCostPerThousandRoundsToSixDecimals(): void
+    {
+        // Avoid floating-point cruft like 0.0066666666666... in the dashboard.
+        $rows = [
+            ['input_tokens' => 100, 'output_tokens' => 50, 'cost_usd' => 0.001],
+        ];
+        $out = UsageAggregator::attachCostPerThousand($rows);
+        // Must be a string with at most 6 decimals when formatted.
+        $this->assertSame(round($out[0]['cost_per_1k_tokens'], 6), $out[0]['cost_per_1k_tokens']);
+    }
+
+    public function testAttachCostPerThousandHandlesEmptyRows(): void
+    {
+        $this->assertSame([], UsageAggregator::attachCostPerThousand([]));
+    }
+
+    public function testAttachCostPerThousandHandlesMissingFields(): void
+    {
+        // Defensive: a malformed row missing token columns shouldn't crash.
+        $rows = [
+            ['model' => 'mystery'], // no token or cost fields
+        ];
+        $out = UsageAggregator::attachCostPerThousand($rows);
+        $this->assertSame(0.0, $out[0]['cost_per_1k_tokens']);
+    }
+
+    // ─── seriesByDimension input validation ───────────────────────────────
+
+    public function testSeriesByDimensionRejectsUnknownColumn(): void
+    {
+        // SQL-injection guard: only allow-listed columns may be used as the
+        // GROUP BY dimension (the column name is splice into raw SQL).
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Unsupported series dimension');
+
+        UsageAggregator::seriesByDimension(
+            \Illuminate\Support\Carbon::now()->subDays(7),
+            'mysql',
+            [],
+            'cost_usd; DROP TABLE ai_usage_log; --',
+            10,
+        );
+    }
+
+    public function testSeriesByDimensionAcceptsAllAllowListedColumns(): void
+    {
+        // Asserts the allow-list itself is what we expect — a refactor that
+        // accidentally drops a dimension would fail this test loudly.
+        $this->assertContains('user_id', UsageAggregator::SERIES_DIMENSIONS);
+        $this->assertContains('model', UsageAggregator::SERIES_DIMENSIONS);
+        $this->assertContains('app_id', UsageAggregator::SERIES_DIMENSIONS);
+        $this->assertContains('provider', UsageAggregator::SERIES_DIMENSIONS);
+        $this->assertContains('role_id', UsageAggregator::SERIES_DIMENSIONS);
+        $this->assertContains('service_id', UsageAggregator::SERIES_DIMENSIONS);
+        $this->assertContains('resource', UsageAggregator::SERIES_DIMENSIONS);
+        // 'cost_usd' must NOT be in the list — it'd group every row into
+        // its own bucket (cardinality blowup).
+        $this->assertNotContains('cost_usd', UsageAggregator::SERIES_DIMENSIONS);
+        $this->assertNotContains('error_message', UsageAggregator::SERIES_DIMENSIONS);
+    }
+
+    public function testOtherBucketSentinelIsStable(): void
+    {
+        // Frontend code keys on this string; it MUST stay stable across
+        // refactors or stacked-area charts will break their legend.
+        $this->assertSame('__other__', UsageAggregator::OTHER_BUCKET);
+    }
 }

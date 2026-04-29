@@ -31,6 +31,24 @@ class UsageAggregator
     ];
 
     /**
+     * Columns that can be used as the X-axis dimension of a stacked time
+     * series via {@see seriesByDimension()}. Allow-list to prevent SQL
+     * injection through the column name.
+     */
+    public const SERIES_DIMENSIONS = [
+        'service_id',
+        'user_id',
+        'role_id',
+        'app_id',
+        'provider',
+        'model',
+        'resource',
+    ];
+
+    /** Sentinel bucket name used in series rows when a row falls outside the top-N. */
+    public const OTHER_BUCKET = '__other__';
+
+    /**
      * Parse a period string like "24h", "7d", "30d", "90d" into a Carbon
      * timestamp representing the inclusive lower bound. Defaults to 7d.
      */
@@ -167,9 +185,10 @@ class UsageAggregator
                 . 'SUM(cost_usd) as cost_usd'
             )
             ->groupBy('model', 'provider')
-            ->orderByDesc('requests')
+            ->orderByDesc('cost_usd')
             ->get()
             ->toArray();
+        $byModel = self::attachCostPerThousand($byModel);
 
         $byResource = (clone $base)
             ->selectRaw('resource, COUNT(*) as requests')
@@ -192,28 +211,46 @@ class UsageAggregator
             ->get()
             ->toArray();
 
+        // Multi-dimensional cost-over-time series — the "where is my money
+        // going" answer. Top N + Other bucket prevents cardinality blowups
+        // when a customer has hundreds of users/apps.
+        $seriesByModel = self::seriesByDimension($since, $driver, $filters, 'model', 10, $until);
+        $seriesByUser = self::seriesByDimension($since, $driver, $filters, 'user_id', 10, $until);
+        $seriesByApp = self::seriesByDimension($since, $driver, $filters, 'app_id', 10, $until);
+        $seriesByProvider = self::seriesByDimension($since, $driver, $filters, 'provider', 10, $until);
+
+        // Drill-down hook: top-N most expensive single calls in the window.
+        // Surfaces outliers (a single 200k-token monster call) that the
+        // averages otherwise hide.
+        $mostExpensiveCalls = self::mostExpensiveCalls($since, $filters, 10, $until);
+
         return [
-            'since'               => $since->toIso8601String(),
-            'total_requests'      => $totalRequests,
-            'total_input_tokens'  => $totalInput,
-            'total_output_tokens' => $totalOutput,
-            'total_cost_usd'      => $totalCostUsd,
-            'errors'              => $errorCount,
-            'partials'            => $partialCount,
-            'avg_latency_ms'      => $avgLatency,
-            'latency_p50_ms'      => $latencyP50,
-            'latency_p95_ms'      => $latencyP95,
-            'latency_p99_ms'      => $latencyP99,
-            'by_service'          => $byService,
-            'by_user'             => $byUser,
-            'by_role'             => $byRole,
-            'by_app'              => $byApp,
-            'by_provider'         => $byProvider,
-            'by_model'            => $byModel,
-            'by_resource'         => $byResource,
-            'by_error_class'      => $byErrorClass,
-            'series'              => $series,
-            'filters'             => self::normalizeFiltersForResponse($filters),
+            'since'                => $since->toIso8601String(),
+            'total_requests'       => $totalRequests,
+            'total_input_tokens'   => $totalInput,
+            'total_output_tokens'  => $totalOutput,
+            'total_cost_usd'       => $totalCostUsd,
+            'errors'               => $errorCount,
+            'partials'             => $partialCount,
+            'avg_latency_ms'       => $avgLatency,
+            'latency_p50_ms'       => $latencyP50,
+            'latency_p95_ms'       => $latencyP95,
+            'latency_p99_ms'       => $latencyP99,
+            'by_service'           => $byService,
+            'by_user'              => $byUser,
+            'by_role'              => $byRole,
+            'by_app'               => $byApp,
+            'by_provider'          => $byProvider,
+            'by_model'             => $byModel,
+            'by_resource'          => $byResource,
+            'by_error_class'       => $byErrorClass,
+            'series'               => $series,
+            'series_by_model'      => $seriesByModel,
+            'series_by_user'       => $seriesByUser,
+            'series_by_app'        => $seriesByApp,
+            'series_by_provider'   => $seriesByProvider,
+            'most_expensive_calls' => $mostExpensiveCalls,
+            'filters'              => self::normalizeFiltersForResponse($filters),
         ];
     }
 
@@ -443,6 +480,175 @@ class UsageAggregator
                 continue;
             }
             $out[$key] = is_array($filters[$key]) ? array_values($filters[$key]) : [$filters[$key]];
+        }
+        return $out;
+    }
+
+    /**
+     * Stacked cost-over-time series for the dashboard's "where is my money
+     * being spent" charts. Returns one row per (date, bucket) pair where
+     * `bucket` is the value of $column for the top N spenders, plus an
+     * '__other__' bucket aggregating everything beyond the top N.
+     *
+     * Why three passes:
+     *   1. Find the top-N values by total cost in the window
+     *   2. Per-(date, value) rollup for those top-N rows
+     *   3. Per-date rollup for the remainder, tagged as the Other bucket
+     *
+     * The Other bucket is essential for honest charts at customers with
+     * hundreds of users/apps — without it, the stacked area silently
+     * undercounts spend.
+     *
+     * @param Carbon $since lower-bound timestamp (inclusive)
+     * @param string $driver DB driver name
+     * @param array<string, mixed> $filters
+     * @param string $column attribute to group by; must be in SERIES_DIMENSIONS
+     * @param int $topN keep the highest-spending $topN values; rest are folded into Other
+     * @return array<int, array{date: string, bucket: int|string, requests: int, input_tokens: int, output_tokens: int, cost_usd: float}>
+     */
+    public static function seriesByDimension(
+        Carbon $since,
+        string $driver,
+        array $filters,
+        string $column,
+        int $topN = 10,
+        ?Carbon $until = null,
+    ): array {
+        if (!in_array($column, self::SERIES_DIMENSIONS, true)) {
+            throw new \InvalidArgumentException(sprintf(
+                'Unsupported series dimension "%s". Allowed: %s',
+                $column,
+                implode(', ', self::SERIES_DIMENSIONS)
+            ));
+        }
+        if ($topN < 1) {
+            $topN = 10;
+        }
+
+        $base = AiUsageLog::query()->where('created_at', '>=', $since);
+        if ($until) {
+            $base->where('created_at', '<', $until);
+        }
+        self::applyFilters($base, $filters);
+
+        // Pass 1: top-N values by cost. Skip nulls — a series stacked by
+        // user_id with a "null user" bucket isn't useful and confuses the UI.
+        $topValues = (clone $base)
+            ->whereNotNull($column)
+            ->groupBy($column)
+            ->selectRaw("$column as value, SUM(cost_usd) as cost")
+            ->orderByDesc('cost')
+            ->limit($topN)
+            ->pluck('value')
+            ->toArray();
+
+        if (empty($topValues)) {
+            return [];
+        }
+
+        $dateExpr = self::dateExpression($driver);
+
+        // Pass 2: per-(date, value) rollup for the top-N values.
+        $topRows = (clone $base)
+            ->whereIn($column, $topValues)
+            ->selectRaw(
+                "$dateExpr as date, $column as bucket, COUNT(*) as requests, "
+                . 'SUM(input_tokens) as input_tokens, '
+                . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd'
+            )
+            ->groupBy(\DB::raw($dateExpr), $column)
+            ->orderBy(\DB::raw($dateExpr))
+            ->get()
+            ->toArray();
+
+        // Pass 3: per-date rollup for everything else. Includes rows whose
+        // dimension value IS null — folding them in here keeps the totals
+        // honest even when attribution is incomplete.
+        $otherRows = (clone $base)
+            ->where(function ($q) use ($column, $topValues) {
+                $q->whereNotIn($column, $topValues)->orWhereNull($column);
+            })
+            ->selectRaw(
+                "$dateExpr as date, COUNT(*) as requests, "
+                . 'SUM(input_tokens) as input_tokens, '
+                . 'SUM(output_tokens) as output_tokens, '
+                . 'SUM(cost_usd) as cost_usd'
+            )
+            ->groupBy(\DB::raw($dateExpr))
+            ->orderBy(\DB::raw($dateExpr))
+            ->having('requests', '>', 0)
+            ->get();
+
+        $otherTagged = [];
+        foreach ($otherRows as $r) {
+            $r->bucket = self::OTHER_BUCKET;
+            $otherTagged[] = (array) $r;
+        }
+
+        return array_merge(
+            array_map(fn($r) => is_array($r) ? $r : (array) $r, $topRows),
+            $otherTagged,
+        );
+    }
+
+    /**
+     * Top N most expensive single calls in the window. The drill-down
+     * companion to the by_model / by_user breakdowns: when a single call
+     * is responsible for a chunk of spend, the user wants to see which
+     * row it was and which (user, app, model) produced it.
+     *
+     * @param array<string, mixed> $filters
+     * @return array<int, array<string, mixed>>
+     */
+    public static function mostExpensiveCalls(
+        Carbon $since,
+        array $filters = [],
+        int $limit = 10,
+        ?Carbon $until = null,
+    ): array {
+        $base = AiUsageLog::query()->where('created_at', '>=', $since);
+        if ($until) {
+            $base->where('created_at', '<', $until);
+        }
+        self::applyFilters($base, $filters);
+
+        return $base
+            ->orderByDesc('cost_usd')
+            ->orderByDesc('id')
+            ->limit(max(1, $limit))
+            ->get([
+                'id', 'service_id', 'user_id', 'role_id', 'app_id',
+                'provider', 'model', 'resource',
+                'input_tokens', 'output_tokens', 'cost_usd', 'latency_ms',
+                'status', 'created_at',
+            ])
+            ->toArray();
+    }
+
+    /**
+     * Augment a list of by_model rows with `cost_per_1k_tokens` — the
+     * effective rate the customer is paying per 1000 tokens, averaged
+     * across the window. Lets the dashboard answer "is this premium model
+     * actually worth its rate" without the UI having to redo the math.
+     *
+     * Pure — exposed for unit testing. Operates on either array-rows or
+     * stdClass-rows (Eloquent's selectRaw produces stdClass).
+     *
+     * @param array<int, array<string, mixed>|object> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    public static function attachCostPerThousand(array $rows): array
+    {
+        $out = [];
+        foreach ($rows as $row) {
+            $r = is_array($row) ? $row : (array) $row;
+            $tokens = (int) ($r['input_tokens'] ?? 0) + (int) ($r['output_tokens'] ?? 0);
+            $cost = (float) ($r['cost_usd'] ?? 0.0);
+            $r['cost_per_1k_tokens'] = $tokens > 0
+                ? round(($cost / $tokens) * 1000, 6)
+                : 0.0;
+            $out[] = $r;
         }
         return $out;
     }
