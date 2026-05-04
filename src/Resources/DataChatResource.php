@@ -7,6 +7,7 @@ namespace DreamFactory\Core\AI\Resources;
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
 use DreamFactory\Core\AI\Providers\AiProviderInterface;
 use DreamFactory\Core\AI\Providers\ToolDefinition;
+use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\Enums\ServiceTypeGroups;
 use DreamFactory\Core\Enums\VerbsMask;
 use DreamFactory\Core\Exceptions\BadRequestException;
@@ -36,6 +37,9 @@ class DataChatResource extends BaseRestResource
     public const RESOURCE_NAME = 'data-chat';
 
     private const MAX_TOOL_ITERATIONS = 25;
+
+    /** Roles accepted from caller-supplied messages. */
+    private static array $validRoles = ['system', 'user', 'assistant'];
     private const TOOL_RESULT_MAX_LENGTH = 50000;
 
     // ────────────────────────────────────────────────────────
@@ -90,6 +94,20 @@ class DataChatResource extends BaseRestResource
             throw new BadRequestException('"messages" must be a non-empty array.');
         }
 
+        // Validate every caller-supplied role against the allowlist before
+        // any provider call. Without this, callers could inject extra
+        // system-role messages mid-conversation, override the server-built
+        // system prompt, or forge provider-internal roles like `tool` or
+        // `developer` that may receive elevated trust from the model.
+        foreach ($messages as $i => $msg) {
+            $role = is_array($msg) ? ($msg['role'] ?? null) : null;
+            if (!is_string($role) || !in_array($role, self::$validRoles, true)) {
+                throw new BadRequestException(
+                    "messages[{$i}].role must be one of: " . implode(', ', self::$validRoles) . '.'
+                );
+            }
+        }
+
         // Resolve the single configured app.
         $config = $this->getAiConfig();
         $app = $this->getConfiguredApp($config);
@@ -111,6 +129,11 @@ class DataChatResource extends BaseRestResource
         /** @var \DreamFactory\Core\AI\Services\AiConnection $service */
         $service = $this->getService();
         $provider = $service->getProvider();
+
+        // Throttle BEFORE the agentic loop fans out — each request can issue
+        // up to MAX_TOOL_ITERATIONS provider calls, so an unthrottled burst
+        // amplifies provider cost by 25x.
+        RateLimiter::check($service->getServiceId(), $provider->getProviderName());
 
         // Build tool definitions only for database services this role can access.
         $dbServices = $this->getDatabaseServicesForRole($roleId);
