@@ -38,8 +38,15 @@ class DataChatResource extends BaseRestResource
 
     private const MAX_TOOL_ITERATIONS = 25;
 
-    /** Roles accepted from caller-supplied messages. */
-    private static array $validRoles = ['system', 'user', 'assistant'];
+    /**
+     * Roles accepted from caller-supplied messages.
+     *
+     * Caller-supplied `system` messages are not allowed here because this
+     * resource already prepends a trusted server-built system prompt that
+     * defines tool/data guardrails. Allowing the client to inject additional
+     * system messages lets them compete with or override those guardrails.
+     */
+    private static array $validRoles = ['user', 'assistant'];
     private const TOOL_RESULT_MAX_LENGTH = 50000;
 
     // ────────────────────────────────────────────────────────

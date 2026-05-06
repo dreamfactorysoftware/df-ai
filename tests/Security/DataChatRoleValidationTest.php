@@ -9,19 +9,21 @@ use PHPUnit\Framework\TestCase;
  *
  * The April 2026 audit (df-ai F-03) found that DataChatResource passes
  * `$msg['role'] ?? 'user'` straight through to the provider without
- * checking it against an allowlist. ChatResource (the same package's
- * non-agentic counterpart) validates roles against
- * `['system', 'user', 'assistant']`.
+ * checking it against an allowlist. The follow-up review found that even
+ * allowing caller-supplied `system` messages is unsafe here because this
+ * resource already prepends a trusted server-built system prompt carrying
+ * the SQL/tool guardrails.
  *
- * Without validation a caller can:
+ * Without strict validation a caller can:
  *  - Inject extra system-role messages mid-conversation, overriding the
  *    server-built system prompt and the SQL/tool guardrails it carries.
  *  - Forge provider-internal role tokens (e.g., `tool`, `developer`)
  *    that may receive elevated trust from the model or change billing
  *    accounting on the provider side.
  *
- * After the fix, DataChatResource rejects messages whose `role` is not
- * in the allowlist before any provider call.
+ * After the fix, DataChatResource rejects any caller message whose `role`
+ * is not in the strict allowlist `['user', 'assistant']` before any
+ * provider call.
  */
 class DataChatRoleValidationTest extends TestCase
 {
@@ -37,16 +39,19 @@ class DataChatRoleValidationTest extends TestCase
 
     public function testSourceHasRoleAllowlist(): void
     {
-        // The fix should declare an allowlist (constant or static array)
-        // containing the three OpenAI/Anthropic-compatible roles.
-        $hasAllowlistConstant =
-            preg_match('/[\'"]system[\'"]\s*,\s*[\'"]user[\'"]\s*,\s*[\'"]assistant[\'"]/', $this->contents) === 1;
-        $hasInlineAllowlist =
-            preg_match('/in_array\s*\([^,]+,\s*\[\s*[\'"]system[\'"]\s*,\s*[\'"]user[\'"]\s*,\s*[\'"]assistant[\'"]\s*\]\s*,\s*true\s*\)/', $this->contents) === 1;
+        // The fix should declare a strict allowlist containing only the
+        // caller-safe roles `user` and `assistant`.
+        $hasStrictAllowlist =
+            preg_match('/[\'"]user[\'"]\s*,\s*[\'"]assistant[\'"]/', $this->contents) === 1;
 
         $this->assertTrue(
-            $hasAllowlistConstant || $hasInlineAllowlist,
-            'DataChatResource must define a {system,user,assistant} role allowlist'
+            $hasStrictAllowlist,
+            'DataChatResource must define a strict {user,assistant} role allowlist'
+        );
+        $this->assertStringNotContainsString(
+            "['system', 'user', 'assistant']",
+            $this->contents,
+            'Caller-supplied system messages must not remain in the allowlist'
         );
     }
 
