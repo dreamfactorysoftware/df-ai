@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DreamFactory\Core\AI\Providers;
 
+use DreamFactory\Core\AI\Providers\Streaming\SseFrameParser;
 use RuntimeException;
 
 /**
@@ -184,6 +185,141 @@ class AnthropicProvider extends BaseAiProvider
             'output_tokens' => $body['usage']['output_tokens'] ?? 0,
             'finish_reason' => $body['stop_reason'] ?? 'unknown',
         ];
+    }
+
+    public function chatStream(array $messages, array $options = []): \Generator
+    {
+        $model = $this->resolveModel($options);
+        $maxTokens = $this->resolveMaxTokens($options);
+        $temperature = $this->resolveTemperature($options);
+
+        // Same system-prompt extraction as chat() — Anthropic wants system as
+        // a top-level field, not a message.
+        $systemContent = null;
+        $filteredMessages = [];
+        foreach ($messages as $msg) {
+            if (($msg['role'] ?? '') === 'system') {
+                $systemContent = ($systemContent ? $systemContent . "\n" : '') . ($msg['content'] ?? '');
+            } else {
+                $filteredMessages[] = $msg;
+            }
+        }
+        if ($this->systemPrompt) {
+            $systemContent = $this->systemPrompt . ($systemContent ? "\n" . $systemContent : '');
+        }
+
+        $payload = array_merge([
+            'model'       => $model,
+            'max_tokens'  => $maxTokens,
+            'temperature' => $temperature,
+            'messages'    => $filteredMessages,
+            'stream'      => true,
+        ], $this->extraParams);
+        if ($systemContent) {
+            $payload['system'] = $systemContent;
+        }
+
+        $stream = $this->streamGuzzle('POST', '/v1/messages', ['json' => $payload]);
+
+        yield from self::translateAnthropicStream(SseFrameParser::parse($stream));
+    }
+
+    public function supportsStreaming(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Translate Anthropic's typed SSE events into the unified event shape.
+     * Pure — exposed for unit testing.
+     *
+     * Anthropic's stream protocol (v2023-06-01):
+     *   message_start          — usage.input_tokens populated; output starts at 1
+     *   content_block_start    — start of a text/tool_use block
+     *   content_block_delta    — text_delta or input_json_delta payloads
+     *   content_block_stop
+     *   message_delta          — final stop_reason + final usage.output_tokens
+     *   message_stop           — terminal
+     *   ping                   — keepalive (ignored)
+     *   error                  — provider-emitted mid-stream error
+     *
+     * @param iterable<int, array{event: ?string, data: string}> $frames
+     * @return \Generator<int, array{type: string, ...}>
+     */
+    public static function translateAnthropicStream(iterable $frames): \Generator
+    {
+        $inputTokens = 0;
+        $outputTokens = 0;
+        $finishReason = null;
+
+        foreach ($frames as $frame) {
+            $eventName = $frame['event'];
+            $decoded = json_decode($frame['data'], true);
+            if (!is_array($decoded)) {
+                continue;
+            }
+
+            // Mid-stream errors are emitted with event:error.
+            if ($eventName === 'error' || ($decoded['type'] ?? '') === 'error') {
+                $msg = $decoded['error']['message'] ?? ($decoded['message'] ?? 'unknown anthropic error');
+                yield ['type' => 'error', 'message' => (string) $msg];
+                return;
+            }
+
+            switch ($eventName) {
+                case 'message_start':
+                    $inputTokens = (int) ($decoded['message']['usage']['input_tokens'] ?? 0);
+                    break;
+
+                case 'content_block_delta':
+                    $delta = $decoded['delta'] ?? [];
+                    // text_delta is the only delta type relevant to plain
+                    // chat — input_json_delta only appears when tools are
+                    // active, and chatStream() is text-only for now.
+                    if (($delta['type'] ?? '') === 'text_delta'
+                        && isset($delta['text'])
+                        && $delta['text'] !== ''
+                    ) {
+                        yield ['type' => 'delta', 'text' => (string) $delta['text']];
+                    }
+                    break;
+
+                case 'message_delta':
+                    if (!empty($decoded['delta']['stop_reason'])) {
+                        $finishReason = (string) $decoded['delta']['stop_reason'];
+                    }
+                    if (isset($decoded['usage']['output_tokens'])) {
+                        $outputTokens = (int) $decoded['usage']['output_tokens'];
+                    }
+                    break;
+
+                case 'message_stop':
+                    yield [
+                        'type'          => 'usage',
+                        'input_tokens'  => $inputTokens,
+                        'output_tokens' => $outputTokens,
+                    ];
+                    if ($finishReason !== null) {
+                        yield ['type' => 'finish', 'reason' => $finishReason];
+                    }
+                    yield ['type' => 'done'];
+                    return;
+
+                // ping, content_block_start, content_block_stop → no output.
+            }
+        }
+
+        // Stream ended without message_stop — emit terminal sentinels anyway
+        // so the resource layer can finalize billing with what we've got.
+        yield [
+            'type'          => 'usage',
+            'input_tokens'  => $inputTokens,
+            'output_tokens' => $outputTokens,
+        ];
+        if ($finishReason !== null) {
+            yield ['type' => 'finish', 'reason' => $finishReason];
+        }
+        yield ['type' => 'done'];
     }
 
     public function listModels(): array

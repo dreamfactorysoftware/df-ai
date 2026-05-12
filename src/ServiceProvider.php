@@ -2,15 +2,15 @@
 
 namespace DreamFactory\Core\AI;
 
+use DreamFactory\Core\AI\Commands\PrunePromptLogs;
 use DreamFactory\Core\AI\Commands\PruneUsageLogs;
+use DreamFactory\Core\AI\Http\Controllers\InternalUsageController;
+use DreamFactory\Core\AI\Http\Controllers\OpenAiCompatController;
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
-use DreamFactory\Core\AI\Providers\AiProviderFactory;
 use DreamFactory\Core\AI\Services\AiConnection;
 use DreamFactory\Core\Enums\ServiceTypeGroups;
 use DreamFactory\Core\Services\ServiceManager;
 use DreamFactory\Core\Services\ServiceType;
-use DreamFactory\Core\Utility\Session;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 class ServiceProvider extends \Illuminate\Support\ServiceProvider
@@ -33,6 +33,14 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
                 ])
             );
         });
+
+        // Register internal routes during booting (before normal boot()) so
+        // they take priority over df-file's greedy {storage}/{path} catch-all
+        // which has an empty prefix and swallows all 2-segment GETs. Same
+        // pattern as df-ai-guardian's approval routes.
+        $this->app->booting(function (): void {
+            $this->registerInternalRoutes();
+        });
     }
 
     public function boot(): void
@@ -40,56 +48,32 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
         $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
 
         if ($this->app->runningInConsole()) {
-            $this->commands([PruneUsageLogs::class]);
+            $this->commands([PruneUsageLogs::class, PrunePromptLogs::class]);
         }
-
-        $this->registerInternalRoutes();
     }
 
     /**
-     * Register internal API routes for admin operations that don't
-     * go through the normal DreamFactory service routing (e.g. testing
-     * a provider connection before a service is saved).
+     * Internal admin endpoints that don't fit the normal service-routing
+     * pattern. Handlers live in InternalUsageController so they can be
+     * unit-tested in isolation.
      */
     private function registerInternalRoutes(): void
     {
         Route::middleware('df.auth_check')->group(function () {
-            Route::post('_internal/ai/test-connection', function (Request $request) {
-                if (!Session::isSysAdmin()) {
-                    return response()->json(
-                        ['error' => ['message' => 'Admin access required.']],
-                        403
-                    );
-                }
+            Route::post('_internal/ai/test-connection', [InternalUsageController::class, 'testConnection']);
+            Route::get('_internal/ai/usage', [InternalUsageController::class, 'usage']);
+            // SIEM pull endpoint — NDJSON stream of ECS-shaped audit
+            // events for Logstash http_poller / Splunk HTTP / Datadog
+            // HTTP intake / any pull-based SIEM pipeline.
+            Route::get('_internal/ai/audit-stream', [InternalUsageController::class, 'auditStream']);
 
-                $config = $request->only([
-                    'provider', 'api_key', 'base_url', 'organization_id',
-                    'extra_headers', 'timeout',
-                ]);
-
-                if (empty($config['provider'])) {
-                    return response()->json(
-                        ['error' => ['message' => 'Provider is required.']],
-                        422
-                    );
-                }
-
-                try {
-                    $provider = AiProviderFactory::make($config);
-                    $models = $provider->listModels();
-
-                    return response()->json([
-                        'success'  => true,
-                        'provider' => $config['provider'],
-                        'resource' => $models,
-                    ]);
-                } catch (\Throwable $e) {
-                    return response()->json([
-                        'success' => false,
-                        'error'   => ['message' => $e->getMessage()],
-                    ], 400);
-                }
-            });
+            // OpenAI-compatible drop-in endpoint. Customer apps point
+            // OPENAI_BASE_URL at /api/v2/_ai/v1 and they're done. Same
+            // RBAC + rate limits + audit + prompt-logging + fallback
+            // chains as native ChatResource — just routed via
+            // model-alias instead of explicit AI Connection name.
+            Route::post('api/v2/_ai/v1/chat/completions', [OpenAiCompatController::class, 'chatCompletions']);
+            Route::get('api/v2/_ai/v1/models', [OpenAiCompatController::class, 'listModels']);
         });
     }
 }
