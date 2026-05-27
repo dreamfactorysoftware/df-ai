@@ -23,16 +23,15 @@ class RateLimiter
     public static function check(int $serviceId, string $providerName): void
     {
         $limit = (int) self::getServiceLimit($serviceId);
-
-        if ($limit <= 0) {
-            return; // Unlimited
-        }
-
         $key = "ai_rate_limit:{$serviceId}";
         $current = (int) Cache::get($key, 0);
 
-        if ($current >= $limit) {
+        if (!self::shouldAllow($current, $limit)) {
             throw AiProviderException::rateLimited($providerName, 60);
+        }
+
+        if ($limit <= 0) {
+            return; // Unlimited — don't bother touching the cache.
         }
 
         // Increment the counter; set expiry to 60 seconds on first hit
@@ -41,6 +40,23 @@ class RateLimiter
         } else {
             Cache::increment($key);
         }
+    }
+
+    /**
+     * Pure decision helper: given a snapshot of the per-minute counter and the
+     * configured limit, should this request be allowed through?
+     *
+     * - A limit of 0 or negative means "unlimited" — always allow.
+     * - Otherwise allow if `current < limit`. The boundary is exclusive: at
+     *   exactly the limit, the next request is rejected (so 60 rpm permits
+     *   exactly 60 requests in a minute, not 61).
+     */
+    public static function shouldAllow(int $current, int $limit): bool
+    {
+        if ($limit <= 0) {
+            return true;
+        }
+        return $current < $limit;
     }
 
     /**
