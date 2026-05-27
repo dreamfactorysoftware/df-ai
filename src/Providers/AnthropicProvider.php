@@ -14,6 +14,29 @@ use RuntimeException;
  */
 class AnthropicProvider extends BaseAiProvider
 {
+    /**
+     * Model prefixes that reject the `temperature` parameter. Anthropic
+     * deprecated `temperature` on the Opus 4.7 line — sending it returns
+     * HTTP 400 ("temperature is deprecated for this model"). Matched by
+     * prefix so dated snapshots (claude-opus-4-7-YYYYMMDD) are covered too.
+     *
+     * @var string[]
+     */
+    private const TEMPERATURE_UNSUPPORTED_PREFIXES = ['claude-opus-4-7'];
+
+    /**
+     * Whether the given model accepts the `temperature` request parameter.
+     */
+    protected function supportsTemperature(string $model): bool
+    {
+        foreach (self::TEMPERATURE_UNSUPPORTED_PREFIXES as $prefix) {
+            if (str_starts_with($model, $prefix)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     protected function buildAuthHeaders(?string $organizationId): array
     {
         $headers = [];
@@ -55,9 +78,12 @@ class AnthropicProvider extends BaseAiProvider
         $payload = array_merge([
             'model'      => $model,
             'max_tokens' => $maxTokens,
-            'temperature' => $temperature,
             'messages'   => $filteredMessages,
         ], $this->extraParams);
+
+        if ($this->supportsTemperature($model)) {
+            $payload['temperature'] = $temperature;
+        }
 
         if ($systemContent) {
             $payload['system'] = $systemContent;
@@ -154,10 +180,13 @@ class AnthropicProvider extends BaseAiProvider
         $payload = array_merge([
             'model'       => $model,
             'max_tokens'  => $maxTokens,
-            'temperature' => $temperature,
             'messages'    => $filteredMessages,
             'tools'       => ToolDefinition::toAnthropicArray($tools),
         ], $this->extraParams);
+
+        if ($this->supportsTemperature($model)) {
+            $payload['temperature'] = $temperature;
+        }
 
         if ($systemContent) {
             $payload['system'] = $systemContent;
@@ -211,10 +240,12 @@ class AnthropicProvider extends BaseAiProvider
         $payload = array_merge([
             'model'       => $model,
             'max_tokens'  => $maxTokens,
-            'temperature' => $temperature,
             'messages'    => $filteredMessages,
             'stream'      => true,
         ], $this->extraParams);
+        if ($this->supportsTemperature($model)) {
+            $payload['temperature'] = $temperature;
+        }
         if ($systemContent) {
             $payload['system'] = $systemContent;
         }
