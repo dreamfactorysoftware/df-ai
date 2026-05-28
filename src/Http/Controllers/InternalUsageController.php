@@ -39,19 +39,29 @@ class InternalUsageController extends Controller
             'extra_headers', 'timeout',
         ]);
 
-        // When editing an existing AI Connection, the form doesn't redisplay
-        // saved secrets — so `api_key` arrives blank even though one is
-        // stored. If the form passes its `service_id`, fall back to the
-        // saved config for any field the form left empty. Lets admins click
-        // "Test Connection" without re-entering secrets every time.
+        // The protection mask the edit form redisplays for saved secrets.
+        // Mirrors Protectable::$protectionMask in df-core.
+        $protectionMask = '**********';
+
+        // When editing an existing AI Connection, the form redisplays the
+        // saved `api_key` as the protection mask (it never re-sends the real
+        // secret), so the request arrives carrying '**********'. If the form
+        // passes its `service_id`, fall back to the saved config for any
+        // field the form left empty OR sent as the mask. Lets admins click
+        // "Test Connection" / "Get models" without re-entering secrets.
         $serviceId = $request->input('service_id');
         if ($serviceId) {
             $saved = \DreamFactory\Core\AI\Models\AiConnectionConfig::query()
                 ->where('service_id', (int) $serviceId)
                 ->first();
             if ($saved) {
+                // Read the real, decrypted secrets rather than the masked
+                // view the model returns by default (protectedView=true).
+                $saved->protectedView = false;
                 foreach (['provider', 'api_key', 'base_url', 'organization_id', 'extra_headers'] as $key) {
-                    if (empty($config[$key]) && !empty($saved->{$key})) {
+                    $incoming = $config[$key] ?? null;
+                    $isBlankOrMasked = empty($incoming) || $incoming === $protectionMask;
+                    if ($isBlankOrMasked && !empty($saved->{$key})) {
                         $config[$key] = $saved->{$key};
                     }
                 }
