@@ -52,6 +52,7 @@ class AiConnectionConfig extends BaseServiceConfigModel
         'anthropic'        => 'https://api.anthropic.com',
         'openai'           => 'https://api.openai.com',
         'xai'              => 'https://api.x.ai',
+        'gemini'           => 'https://generativelanguage.googleapis.com',
         'ollama'           => 'http://localhost:11434',
         'openai_compatible' => '',
     ];
@@ -105,6 +106,7 @@ class AiConnectionConfig extends BaseServiceConfigModel
                     ['label' => 'Anthropic (Claude)',           'name' => 'anthropic',        'default_base_url' => 'https://api.anthropic.com'],
                     ['label' => 'OpenAI (GPT)',                 'name' => 'openai',           'default_base_url' => 'https://api.openai.com'],
                     ['label' => 'xAI (Grok)',                   'name' => 'xai',              'default_base_url' => 'https://api.x.ai'],
+                    ['label' => 'Google (Gemini)',              'name' => 'gemini',           'default_base_url' => 'https://generativelanguage.googleapis.com'],
                     ['label' => 'Ollama (Local)',                'name' => 'ollama',           'default_base_url' => 'http://localhost:11434'],
                     ['label' => 'OpenAI-Compatible (Custom)',    'name' => 'openai_compatible', 'default_base_url' => ''],
                 ];
