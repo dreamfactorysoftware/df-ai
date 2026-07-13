@@ -87,7 +87,9 @@ class UsageLogger
     public static function requestId(): string
     {
         if (self::$requestId === null) {
-            self::$requestId = (string) Str::uuid();
+            // Default to the platform trace id so ai_usage_log/ai_prompt_log rows
+            // join with mcp_request_log and every other hop of the same action.
+            self::$requestId = \DreamFactory\Core\Utility\TraceId::get();
         }
         return self::$requestId;
     }
