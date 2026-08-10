@@ -56,7 +56,11 @@ class ModelAliasResolver
     /**
      * List all active aliases in the OpenAI `/v1/models` shape.
      *
-     * @return array<int, array{id: string, object: string, created: int, owned_by: string}>
+     * The `service_id` on each row lets the gateway controller filter the
+     * list down to the AI Connections the caller's role can actually GET,
+     * before stripping it from the OpenAI-shape response.
+     *
+     * @return array<int, array{id: string, object: string, created: int, owned_by: string, service_id: int}>
      */
     public static function listForOpenAiModels(): array
     {
@@ -68,7 +72,8 @@ class ModelAliasResolver
         $out = [];
         foreach ($rows as $alias) {
             $out[] = [
-                'id'       => (string) $alias->name,
+                'id'         => (string) $alias->name,
+                'service_id' => (int) $alias->service_id,
                 'object'   => 'model',
                 // ECMAScript-style epoch seconds. OpenAI fills this with
                 // the model's release date; for us, the alias creation
