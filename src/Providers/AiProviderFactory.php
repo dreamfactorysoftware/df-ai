@@ -43,6 +43,7 @@ class AiProviderFactory
             'anthropic'        => new AnthropicProvider(...$args),
             'openai'           => new OpenAIProvider(...$args),
             'xai'              => new XaiProvider(...$args),
+            'gemini'           => new GeminiProvider(...$args),
             'ollama'           => new OllamaProvider(...$args),
             'openai_compatible' => new OpenAICompatibleProvider(...$args),
             default            => throw new InvalidArgumentException("Unknown AI provider: {$provider}"),
@@ -146,6 +147,7 @@ class AiProviderFactory
             'anthropic' => 'https://api.anthropic.com',
             'openai'    => 'https://api.openai.com',
             'xai'       => 'https://api.x.ai',
+            'gemini'    => 'https://generativelanguage.googleapis.com',
             'ollama'    => 'http://localhost:11434',
             default     => '',
         };

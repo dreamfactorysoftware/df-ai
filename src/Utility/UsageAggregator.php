@@ -154,6 +154,11 @@ class UsageAggregator
             ->get()
             ->toArray();
 
+        // ACP chargeback rollup: spend by directory department/cost-center.
+        // This is the dimension GCP project-level billing cannot produce —
+        // it lives in the Entra/LDAP directory DF federates, not in Google IAM.
+        $byDepartment = self::byDepartment($since, $filters, $until);
+
         $byApp = (clone $base)
             ->selectRaw(
                 'app_id, COUNT(*) as requests, '
@@ -239,6 +244,7 @@ class UsageAggregator
             'by_service'           => $byService,
             'by_user'              => $byUser,
             'by_role'              => $byRole,
+            'by_department'        => $byDepartment,
             'by_app'               => $byApp,
             'by_provider'          => $byProvider,
             'by_model'             => $byModel,
@@ -252,6 +258,54 @@ class UsageAggregator
             'most_expensive_calls' => $mostExpensiveCalls,
             'filters'              => self::normalizeFiltersForResponse($filters),
         ];
+    }
+
+    /**
+     * ACP chargeback rollup: total spend grouped by directory department,
+     * left-joining ai_usage_log.user_id to the user_department mapping that
+     * df-adldap populates at login. Users with no mapping (agents, service
+     * accounts, pre-ACP logins) collapse into an 'Unattributed' bucket so the
+     * department totals always reconcile to the raw usage total.
+     *
+     * The department dimension lives in a separate table on purpose — it is a
+     * directory-owned attribute we cache, not core usage schema — so this is
+     * the one rollup that needs a join rather than a plain groupBy.
+     *
+     * @param array<string, mixed> $filters
+     * @return array<int, array{department: string, requests: int, input_tokens: int, output_tokens: int, cost_usd: float}>
+     */
+    public static function byDepartment(
+        Carbon $since,
+        array $filters = [],
+        ?Carbon $until = null,
+    ): array {
+        $usage = (new AiUsageLog())->getTable();
+        // COALESCE is portable across mysql/pgsql/sqlite; department is
+        // varchar so no cast needed.
+        $deptExpr = "COALESCE(user_department.department, 'Unattributed')";
+
+        $q = AiUsageLog::query()->where("$usage.created_at", '>=', $since);
+        if ($until) {
+            $q->where("$usage.created_at", '<', $until);
+        }
+        // ponytail: applyFilters uses bare column names. user_id now exists in
+        // both tables, so filtering by user_id AND grouping by department at
+        // once would be ambiguous. Not a demo path; qualify it here if it ever
+        // becomes one.
+        self::applyFilters($q, $filters);
+
+        return $q
+            ->leftJoin('user_department', 'user_department.user_id', '=', "$usage.user_id")
+            ->selectRaw(
+                "$deptExpr as department, COUNT(*) as requests, "
+                . "SUM($usage.input_tokens) as input_tokens, "
+                . "SUM($usage.output_tokens) as output_tokens, "
+                . "SUM($usage.cost_usd) as cost_usd"
+            )
+            ->groupBy(\DB::raw($deptExpr))
+            ->orderByDesc('cost_usd')
+            ->get()
+            ->toArray();
     }
 
     /**

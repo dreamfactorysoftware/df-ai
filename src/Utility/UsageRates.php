@@ -12,7 +12,8 @@ use DreamFactory\Core\AI\Models\AiConnectionConfig;
  * Lookup order, most specific first:
  *   1. Per-model entry in the AI Connection's model_rates JSON.
  *   2. Per-service flat rates on the AI Connection (cost_per_1k_input/output).
- *   3. DEFAULT_RATES table keyed by provider.
+ *   3. MODEL_RATES table keyed by model name.
+ *   4. DEFAULT_RATES table keyed by provider.
  *
  * Configs are cached in a static map for the lifetime of the request — the
  * usage logger fires once per provider call, so repeated lookups within a
@@ -28,10 +29,8 @@ class UsageRates
     private static array $configCache = [];
 
     /**
-     * Provider-level fallback rates (USD per 1k tokens). Mirrors
-     * df-admin-interface/src/app/adf-ai-usage/utils/cost.ts so the dashboard's
-     * client-side what-if estimator and the server-stored cost agree when no
-     * per-service rate is configured.
+     * Provider-level fallback rates (USD per 1k tokens). Used when no
+     * per-model or per-service rate is configured.
      *
      * @var array<string, array{input: float, output: float}>
      */
@@ -41,6 +40,31 @@ class UsageRates
         'xai'               => ['input' => 0.002,  'output' => 0.01],
         'ollama'            => ['input' => 0.0,    'output' => 0.0],
         'openai_compatible' => ['input' => 0.0,    'output' => 0.0],
+    ];
+
+    /**
+     * Per-model rates (USD per 1k tokens). Checked before DEFAULT_RATES
+     * so models that differ from their provider average get correct cost.
+     *
+     * @var array<string, array{input: float, output: float}>
+     */
+    public const MODEL_RATES = [
+        'claude-opus-4-8'            => ['input' => 0.015,   'output' => 0.075],
+        'claude-opus-4-6'            => ['input' => 0.015,   'output' => 0.075],
+        'claude-sonnet-4-6'          => ['input' => 0.003,   'output' => 0.015],
+        'claude-sonnet-4-5-20250514' => ['input' => 0.003,   'output' => 0.015],
+        'claude-3-5-sonnet-20241022' => ['input' => 0.003,   'output' => 0.015],
+        'claude-haiku-4-5-20251001'  => ['input' => 0.001,   'output' => 0.005],
+        'claude-3-5-haiku-20241022'  => ['input' => 0.001,   'output' => 0.005],
+        'gpt-4o'                     => ['input' => 0.0025,  'output' => 0.01],
+        'gpt-4o-2024-11-20'          => ['input' => 0.0025,  'output' => 0.01],
+        'gpt-4.1'                    => ['input' => 0.002,   'output' => 0.008],
+        'gpt-4.1-mini'               => ['input' => 0.0004,  'output' => 0.0016],
+        'gpt-4.1-nano'               => ['input' => 0.0001,  'output' => 0.0004],
+        'gpt-4o-mini'                => ['input' => 0.00015, 'output' => 0.0006],
+        'gpt-4o-mini-2024-07-18'     => ['input' => 0.00015, 'output' => 0.0006],
+        'grok-3'                     => ['input' => 0.003,   'output' => 0.015],
+        'grok-3-mini'                => ['input' => 0.0003,  'output' => 0.0005],
     ];
 
     public static function estimate(
@@ -80,6 +104,11 @@ class UsageRates
             if ($flatIn !== null || $flatOut !== null) {
                 return [(float) ($flatIn ?? 0), (float) ($flatOut ?? 0)];
             }
+        }
+
+        if ($model && isset(self::MODEL_RATES[$model])) {
+            $mr = self::MODEL_RATES[$model];
+            return [$mr['input'], $mr['output']];
         }
 
         $default = self::DEFAULT_RATES[$provider] ?? ['input' => 0.0, 'output' => 0.0];
@@ -147,21 +176,28 @@ class UsageRates
     }
 
     /**
-     * DEFAULT_RATES in API-friendly snake_case shape, for serving to the
-     * Gateway dashboard so the frontend doesn't need its own copy of the
-     * provider-default pricing table.
+     * Rates in API-friendly shape for the Gateway dashboard.
      *
-     * @return array<string, array{input_per_1k: float, output_per_1k: float}>
+     * @return array{providers: array<string, array{input_per_1k: float, output_per_1k: float}>, models: array<string, array{input_per_1k: float, output_per_1k: float}>}
      */
     public static function defaultRatesForApi(): array
     {
-        $out = [];
+        $providers = [];
         foreach (self::DEFAULT_RATES as $provider => $rates) {
-            $out[$provider] = [
+            $providers[$provider] = [
                 'input_per_1k'  => $rates['input'],
                 'output_per_1k' => $rates['output'],
             ];
         }
-        return $out;
+
+        $models = [];
+        foreach (self::MODEL_RATES as $model => $rates) {
+            $models[$model] = [
+                'input_per_1k'  => $rates['input'],
+                'output_per_1k' => $rates['output'],
+            ];
+        }
+
+        return ['providers' => $providers, 'models' => $models];
     }
 }

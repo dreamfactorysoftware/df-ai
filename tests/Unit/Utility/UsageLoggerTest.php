@@ -83,6 +83,9 @@ class UsageLoggerTest extends TestCase
         $ref = new \ReflectionProperty(UsageLogger::class, 'requestId');
         $ref->setAccessible(true);
         $ref->setValue(null, null);
+        // request_id now defaults to the platform trace id, which caches in
+        // its own static — a real second PHP request resets both.
+        \DreamFactory\Core\Utility\TraceId::reset();
 
         $second = UsageLogger::requestId();
 
