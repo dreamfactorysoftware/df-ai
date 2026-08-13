@@ -8,6 +8,7 @@ use DreamFactory\Core\AI\Http\Controllers\InternalUsageController;
 use DreamFactory\Core\AI\Http\Controllers\OpenAiCompatController;
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
 use DreamFactory\Core\AI\Services\AiConnection;
+use DreamFactory\Core\Enums\LicenseLevel;
 use DreamFactory\Core\Enums\ServiceTypeGroups;
 use DreamFactory\Core\Services\ServiceManager;
 use DreamFactory\Core\Services\ServiceType;
@@ -26,6 +27,7 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
                     'label'           => 'AI Connection',
                     'description'     => 'Connect to AI/LLM providers (Anthropic, OpenAI, xAI, Ollama, custom OpenAI-compatible endpoints).',
                     'group'           => ServiceTypeGroups::AI,
+                    'subscription_required' => LicenseLevel::SILVER,
                     'config_handler'  => AiConnectionConfig::class,
                     'factory'         => function ($config) {
                         return new AiConnection($config);
