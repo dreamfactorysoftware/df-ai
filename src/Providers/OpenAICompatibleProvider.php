@@ -19,6 +19,15 @@ use RuntimeException;
  */
 class OpenAICompatibleProvider extends BaseAiProvider
 {
+    /**
+     * Path prefix for the OpenAI-compatible routes. Standard OpenAI servers
+     * (OpenAI, xAI, Ollama, most gateways) serve them at host-root `/v1`.
+     * Providers whose compat surface lives elsewhere (e.g. Gemini's
+     * `/v1beta/openai`) override this. The request URIs are absolute, so only
+     * scheme+host of base_url is used — the prefix here is what steers routing.
+     */
+    protected string $pathPrefix = '/v1';
+
     protected function buildAuthHeaders(?string $organizationId): array
     {
         $headers = [];
@@ -59,7 +68,7 @@ class OpenAICompatibleProvider extends BaseAiProvider
             'messages'   => $messages,
         ], $this->extraParams);
 
-        $body = $this->request('POST', '/v1/chat/completions', ['json' => $payload]);
+        $body = $this->request('POST', $this->pathPrefix . '/chat/completions', ['json' => $payload]);
 
         if (!isset($body['choices'][0]['message']['content'])) {
             throw new RuntimeException(
@@ -98,7 +107,7 @@ class OpenAICompatibleProvider extends BaseAiProvider
             'tools'       => ToolDefinition::toOpenAIArray($tools),
         ], $this->extraParams);
 
-        $body = $this->request('POST', '/v1/chat/completions', ['json' => $payload]);
+        $body = $this->request('POST', $this->pathPrefix . '/chat/completions', ['json' => $payload]);
 
         if (!isset($body['choices'][0]['message'])) {
             throw new RuntimeException(
@@ -131,7 +140,7 @@ class OpenAICompatibleProvider extends BaseAiProvider
 
     public function listModels(): array
     {
-        $body = $this->request('GET', '/v1/models');
+        $body = $this->request('GET', $this->pathPrefix . '/models');
         $models = [];
         foreach ($body['data'] ?? [] as $m) {
             $models[] = [
@@ -151,7 +160,7 @@ class OpenAICompatibleProvider extends BaseAiProvider
             'input' => is_array($input) ? $input : [$input],
         ];
 
-        $body = $this->request('POST', '/v1/embeddings', ['json' => $payload]);
+        $body = $this->request('POST', $this->pathPrefix . '/embeddings', ['json' => $payload]);
 
         return [
             'data'  => $body['data'] ?? [],
@@ -183,7 +192,7 @@ class OpenAICompatibleProvider extends BaseAiProvider
             'stream_options' => ['include_usage' => true],
         ], $this->extraParams);
 
-        $stream = $this->streamGuzzle('POST', '/v1/chat/completions', ['json' => $payload]);
+        $stream = $this->streamGuzzle('POST', $this->pathPrefix . '/chat/completions', ['json' => $payload]);
 
         yield from self::translateOpenAiStream(
             SseFrameParser::parse($stream),

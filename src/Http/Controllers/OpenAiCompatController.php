@@ -17,6 +17,9 @@ use DreamFactory\Core\AI\Utility\AuditDispatcher;
 use DreamFactory\Core\AI\Utility\OpenAiResponseFormatter;
 use DreamFactory\Core\AI\Utility\PromptLogger;
 use DreamFactory\Core\AI\Utility\UsageLogger;
+use DreamFactory\Core\Enums\ServiceRequestorTypes;
+use DreamFactory\Core\Enums\Verbs;
+use DreamFactory\Core\Exceptions\ForbiddenException;
 use DreamFactory\Core\Exceptions\NotFoundException;
 use DreamFactory\Core\Http\Controllers\Controller;
 use DreamFactory\Core\Utility\Session;
@@ -92,6 +95,26 @@ class OpenAiCompatController extends Controller
         $serviceId  = $alias['service_id'];
         $aliasName  = $alias['alias_name'];
 
+        // RBAC. The route carries only df.auth_check, which resolves
+        // identity but does NOT reject anonymous or role-scoped callers.
+        // The native /api/v2/<svc>/chat path is guarded per-service by
+        // AccessCheck; this custom route skips it, so we enforce the same
+        // per-service grant here. checkServicePermission intersects the
+        // POST verb bit with the caller's own role mask for this exact
+        // AI Connection and throws ForbiddenException (403) otherwise.
+        // A caller with no role (anonymous) gets an empty mask and is
+        // rejected. A caller whose role grants a different service, or
+        // grants GET but not POST on this one, is rejected by the bit.
+        $serviceName = \ServiceManager::getServiceNameById($serviceId);
+        if (!$serviceName) {
+            return $this->errorResponse(404, "Model '{$model}' is not configured.", 'invalid_request_error', 'model_not_found');
+        }
+        try {
+            Session::checkServicePermission(Verbs::POST, $serviceName);
+        } catch (ForbiddenException $e) {
+            return $this->errorResponse(403, $e->getMessage(), 'invalid_request_error', 'insufficient_permissions');
+        }
+
         // Rate limit against the resolved service. We deliberately
         // check ONLY the primary — fallbacks have their own per-service
         // rate limits applied at their own dispatch.
@@ -137,9 +160,30 @@ class OpenAiCompatController extends Controller
      */
     public function listModels(): JsonResponse
     {
+        // Only advertise aliases whose AI Connection the caller's role
+        // can GET. Same per-service RBAC as chatCompletions, applied as a
+        // non-throwing filter so authorized callers still see their own
+        // models. Anonymous or unscoped callers get an empty list rather
+        // than an enumeration of every configured model.
+        $data = [];
+        foreach (ModelAliasResolver::listForOpenAiModels() as $model) {
+            $serviceId = $model['service_id'] ?? null;
+            unset($model['service_id']);
+            if ($serviceId === null) {
+                continue;
+            }
+            $serviceName = \ServiceManager::getServiceNameById((int) $serviceId);
+            if (!$serviceName) {
+                continue;
+            }
+            if (Session::checkServicePermission(Verbs::GET, $serviceName, null, ServiceRequestorTypes::API, false)) {
+                $data[] = $model;
+            }
+        }
+
         return response()->json([
             'object' => 'list',
-            'data'   => ModelAliasResolver::listForOpenAiModels(),
+            'data'   => $data,
         ]);
     }
 

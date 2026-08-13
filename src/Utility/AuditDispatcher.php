@@ -9,6 +9,7 @@ use DreamFactory\Core\AI\Models\AiPromptLog;
 use DreamFactory\Core\AI\Models\AiUsageLog;
 use GuzzleHttp\Client;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * Pushes ECS-shaped audit events out to per-AI-Connection sinks:
@@ -51,7 +52,10 @@ class AuditDispatcher
 
         $hasWebhook = !empty($config->audit_webhook_url);
         $hasFileSink = (bool) ($config->audit_file_sink_enabled ?? false);
-        if (!$hasWebhook && !$hasFileSink) {
+        // ponytail: Langfuse sink reads container env directly so df-ai stays
+        // decoupled from df-ai-insights. For production, fold these into df-ai config.
+        $hasLangfuse = self::langfuseEnabled();
+        if (!$hasWebhook && !$hasFileSink && !$hasLangfuse) {
             return; // No sinks configured; nothing to do.
         }
 
@@ -86,6 +90,127 @@ class AuditDispatcher
         if ($hasFileSink) {
             self::writeFileSink($event);
         }
+
+        if ($hasLangfuse) {
+            self::sendLangfuse($usage->toArray(), $prompt?->toArray());
+        }
+    }
+
+    private static function langfuseEnabled(): bool
+    {
+        return filter_var(env('AI_INSIGHTS_ENABLED', false), FILTER_VALIDATE_BOOL)
+            && (string) env('AI_INSIGHTS_LANGFUSE_PUBLIC_KEY', '') !== ''
+            && (string) env('AI_INSIGHTS_LANGFUSE_SECRET_KEY', '') !== '';
+    }
+
+    /**
+     * Forward one completion to Langfuse as a trace + generation observation.
+     * Langfuse derives cost from model + token usage. Best-effort, like the
+     * other sinks — a slow/broken Langfuse must never break the AI response.
+     */
+    public static function sendLangfuse(array $usage, ?array $prompt): void
+    {
+        $pub  = (string) env('AI_INSIGHTS_LANGFUSE_PUBLIC_KEY', '');
+        $sec  = (string) env('AI_INSIGHTS_LANGFUSE_SECRET_KEY', '');
+        $base = rtrim((string) env('AI_INSIGHTS_LANGFUSE_BASE_URL', 'http://localhost:3000'), '/');
+        if ($pub === '' || $sec === '') {
+            return;
+        }
+
+        $requestId = (string) ($usage['request_id'] ?? Str::uuid()->toString());
+        $end       = self::toUtc($usage['created_at'] ?? null);
+        $latencyMs = (int) ($usage['latency_ms'] ?? 0);
+        $start     = $latencyMs > 0 ? $end->modify("-{$latencyMs} milliseconds") : $end;
+        $endIso    = $end->format('Y-m-d\TH:i:s.v\Z');
+        $startIso  = $start->format('Y-m-d\TH:i:s.v\Z');
+
+        $input  = self::decodePayload($prompt['request_payload'] ?? null);
+        $output = self::decodePayload($prompt['response_payload'] ?? null);
+        $isError = ($usage['status'] ?? '') === 'error';
+
+        $batch = [
+            [
+                'id'        => Str::uuid()->toString(),
+                'type'      => 'trace-create',
+                'timestamp' => $endIso,
+                'body'      => [
+                    'id'       => $requestId,
+                    'name'     => 'ai-chat',
+                    'input'    => $input,
+                    'output'   => $output,
+                    'userId'   => isset($usage['user_id']) ? (string) $usage['user_id'] : null,
+                    'tags'     => array_values(array_filter(['ai-gateway', $usage['provider'] ?? null])),
+                    'metadata' => [
+                        'request_id' => $requestId,
+                        'service_id' => $usage['service_id'] ?? null,
+                        'resource'   => $usage['resource'] ?? null,
+                        'status'     => $usage['status'] ?? null,
+                    ],
+                ],
+            ],
+            [
+                'id'        => Str::uuid()->toString(),
+                'type'      => 'generation-create',
+                'timestamp' => $endIso,
+                'body'      => [
+                    'id'            => Str::uuid()->toString(),
+                    'traceId'       => $requestId,
+                    'name'          => 'completion',
+                    'model'         => (string) ($usage['model'] ?? ''),
+                    'startTime'     => $startIso,
+                    'endTime'       => $endIso,
+                    'input'         => $input,
+                    'output'        => $output,
+                    'usage'         => [
+                        'input'  => (int) ($usage['input_tokens'] ?? 0),
+                        'output' => (int) ($usage['output_tokens'] ?? 0),
+                        'unit'   => 'TOKENS',
+                    ],
+                    'level'         => $isError ? 'ERROR' : 'DEFAULT',
+                    'statusMessage' => $usage['error_message'] ?? null,
+                    'metadata'      => [
+                        'provider'   => $usage['provider'] ?? null,
+                        'cost_usd'   => $usage['cost_usd'] ?? null,
+                        'latency_ms' => $latencyMs,
+                    ],
+                ],
+            ],
+        ];
+
+        try {
+            self::client()->request('POST', $base . '/api/public/ingestion', [
+                'json'    => ['batch' => $batch],
+                'headers' => [
+                    'Content-Type'  => 'application/json',
+                    'Authorization' => 'Basic ' . base64_encode($pub . ':' . $sec),
+                ],
+                'timeout' => 5,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Langfuse ingestion failed: ' . $e->getMessage());
+        }
+    }
+
+    private static function toUtc(mixed $ts): \DateTimeImmutable
+    {
+        try {
+            if (is_string($ts) && $ts !== '') {
+                return new \DateTimeImmutable($ts, new \DateTimeZone('UTC'));
+            }
+        } catch (\Throwable) {
+            // fall through to now
+        }
+        return new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+    }
+
+    /** Decode a JSON payload column to an array; pass through plain strings; null when empty. */
+    private static function decodePayload(mixed $payload): mixed
+    {
+        if (!is_string($payload) || $payload === '') {
+            return null;
+        }
+        $decoded = json_decode($payload, true);
+        return json_last_error() === JSON_ERROR_NONE ? $decoded : $payload;
     }
 
     /**
