@@ -88,6 +88,10 @@ class UsageAggregatorTest extends TestCase
             'to_char',
             UsageAggregator::dateExpression('pgsql')
         );
+        $this->assertStringContainsString(
+            'CONVERT',
+            UsageAggregator::dateExpression('sqlsrv')
+        );
         // Unknown drivers fall back to MySQL syntax.
         $this->assertStringContainsString(
             'DATE_FORMAT',
@@ -104,7 +108,7 @@ class UsageAggregatorTest extends TestCase
         // Whichever driver: the column being grouped on must always be
         // created_at — a refactor that breaks this would silently drop the
         // time-series chart on the dashboard.
-        foreach (['mysql', 'sqlite', 'pgsql', 'mariadb'] as $driver) {
+        foreach (['mysql', 'sqlite', 'pgsql', 'sqlsrv', 'mariadb'] as $driver) {
             $expr = UsageAggregator::dateExpression($driver);
             $this->assertStringContainsString(
                 'created_at',
