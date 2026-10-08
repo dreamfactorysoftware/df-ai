@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DreamFactory\Core\AI\Providers;
 
+use DreamFactory\Core\AI\Exceptions\AiProviderException;
 use DreamFactory\Core\AI\Providers\Streaming\SseFrameParser;
 use RuntimeException;
 
@@ -15,26 +16,69 @@ use RuntimeException;
 class AnthropicProvider extends BaseAiProvider
 {
     /**
-     * Model prefixes that reject the `temperature` parameter. Anthropic
-     * deprecated `temperature` on the Opus 4.7 line — sending it returns
-     * HTTP 400 ("temperature is deprecated for this model"). Matched by
-     * prefix so dated snapshots (claude-opus-4-7-YYYYMMDD) are covered too.
+     * Models the API has told us reject `temperature` (HTTP 400 "temperature
+     * is deprecated for this model"), learned at runtime for this process so
+     * the retry below happens once per model, not once per call.
      *
-     * @var string[]
+     * @var array<string, true>
      */
-    private const TEMPERATURE_UNSUPPORTED_PREFIXES = ['claude-opus-4-7'];
+    private static array $temperatureRejected = [];
 
     /**
      * Whether the given model accepts the `temperature` request parameter.
+     *
+     * Anthropic removed the sampling parameters (`temperature`, `top_p`,
+     * `top_k`) from Opus 4.7 onward, and newer models follow that direction,
+     * so the safe default for a model this code has never seen is to omit it.
+     * Only the generations known to accept it get it: anything before Claude 4,
+     * and Claude 4.0 through 4.6 (Opus 4.1 / 4.5 / 4.6, Sonnet 4 / 4.5 / 4.6,
+     * Haiku 4.5). Model names put the version before the family in older
+     * names (claude-3-5-sonnet-20241022) and after it in newer ones
+     * (claude-sonnet-4-6, claude-opus-5-5); dated snapshots carry a trailing
+     * YYYYMMDD that must not be read as a minor version.
      */
     protected function supportsTemperature(string $model): bool
     {
-        foreach (self::TEMPERATURE_UNSUPPORTED_PREFIXES as $prefix) {
-            if (str_starts_with($model, $prefix)) {
-                return false;
-            }
+        if (isset(self::$temperatureRejected[$model])) {
+            return false;
         }
-        return true;
+        if (!preg_match('/^claude-(?:[a-z]+-)?(\d+)(?:-(\d+))?/i', $model, $m)) {
+            return false;
+        }
+        $major = (int) $m[1];
+        $minor = isset($m[2]) && strlen($m[2]) <= 2 ? (int) $m[2] : 0;
+
+        return $major < 4 || ($major === 4 && $minor <= 6);
+    }
+
+    /**
+     * Send a /v1/messages request; if the API rejects `temperature` for this
+     * model (a 400 naming the parameter), drop it, remember the model and
+     * retry once. A 400 is immediate and bills no tokens, so the retry is
+     * cheaper than a stale model list.
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    protected function postMessages(array $payload): array
+    {
+        try {
+            return $this->request('POST', '/v1/messages', ['json' => $payload]);
+        } catch (AiProviderException $e) {
+            if (!array_key_exists('temperature', $payload) || !self::rejectsTemperature($e)) {
+                throw $e;
+            }
+            self::$temperatureRejected[(string) ($payload['model'] ?? '')] = true;
+            unset($payload['temperature']);
+
+            return $this->request('POST', '/v1/messages', ['json' => $payload]);
+        }
+    }
+
+    /** A 400 whose message blames the temperature parameter. */
+    private static function rejectsTemperature(AiProviderException $e): bool
+    {
+        return $e->getHttpStatus() === 400 && stripos($e->getMessage(), 'temperature') !== false;
     }
 
     protected function buildAuthHeaders(?string $organizationId): array
@@ -89,16 +133,25 @@ class AnthropicProvider extends BaseAiProvider
             $payload['system'] = $systemContent;
         }
 
-        $body = $this->request('POST', '/v1/messages', ['json' => $payload]);
+        $body = $this->postMessages($payload);
 
-        if (!isset($body['content'][0]['text'])) {
+        // Current models (Opus 4.6+, Sonnet 4.6+, the Claude 5 family) think by
+        // default and put a `thinking` block ahead of the text, so the text is
+        // not necessarily content[0]: gather every text block in order.
+        $text = null;
+        foreach ($body['content'] ?? [] as $block) {
+            if (($block['type'] ?? '') === 'text' && isset($block['text'])) {
+                $text = ($text ?? '') . $block['text'];
+            }
+        }
+        if ($text === null) {
             throw new RuntimeException(
-                'Anthropic API returned unexpected response: ' . substr((string) json_encode($body), 0, 300)
+                'Anthropic API returned no text (stop_reason: ' . ($body['stop_reason'] ?? 'unknown') . '): ' . substr((string) json_encode($body), 0, 300)
             );
         }
 
         return [
-            'content'       => $body['content'][0]['text'],
+            'content'       => $text,
             'provider'      => 'anthropic',
             'model'         => $body['model'] ?? $model,
             'input_tokens'  => $body['usage']['input_tokens'] ?? 0,
@@ -192,7 +245,7 @@ class AnthropicProvider extends BaseAiProvider
             $payload['system'] = $systemContent;
         }
 
-        $body = $this->request('POST', '/v1/messages', ['json' => $payload]);
+        $body = $this->postMessages($payload);
 
         // Parse content blocks — may contain text and/or tool_use blocks.
         $textParts = [];
