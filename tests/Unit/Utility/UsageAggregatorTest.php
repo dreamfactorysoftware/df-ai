@@ -99,12 +99,20 @@ class UsageAggregatorTest extends TestCase
         );
     }
 
+    public function testDateExpressionForSqlServerUsesConvertStyle23(): void
+    {
+        $expr = UsageAggregator::dateExpression('sqlsrv');
+
+        $this->assertSame('CONVERT(varchar(10), created_at, 23)', $expr);
+        $this->assertStringNotContainsString('DATE_FORMAT', $expr);
+    }
+
     public function testDateExpressionAlwaysOperatesOnCreatedAt(): void
     {
         // Whichever driver: the column being grouped on must always be
         // created_at — a refactor that breaks this would silently drop the
         // time-series chart on the dashboard.
-        foreach (['mysql', 'sqlite', 'pgsql', 'mariadb'] as $driver) {
+        foreach (['mysql', 'sqlite', 'pgsql', 'sqlsrv', 'mariadb'] as $driver) {
             $expr = UsageAggregator::dateExpression($driver);
             $this->assertStringContainsString(
                 'created_at',
