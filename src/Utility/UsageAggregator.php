@@ -631,7 +631,6 @@ class UsageAggregator
             )
             ->groupBy(\DB::raw($dateExpr))
             ->orderBy(\DB::raw($dateExpr))
-            ->having('requests', '>', 0)
             ->get();
 
         $otherTagged = [];
@@ -718,6 +717,9 @@ class UsageAggregator
         }
         if ($driver === 'pgsql') {
             return "to_char(created_at, 'YYYY-MM-DD')";
+        }
+        if ($driver === 'sqlsrv') {
+            return "CONVERT(varchar(10), created_at, 23)";
         }
         // MySQL / MariaDB default
         return "DATE_FORMAT(created_at, '%Y-%m-%d')";

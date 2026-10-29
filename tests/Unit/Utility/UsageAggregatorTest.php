@@ -99,12 +99,20 @@ class UsageAggregatorTest extends TestCase
         );
     }
 
+    public function testDateExpressionForSqlServerUsesConvertStyle23(): void
+    {
+        $expr = UsageAggregator::dateExpression('sqlsrv');
+
+        $this->assertSame('CONVERT(varchar(10), created_at, 23)', $expr);
+        $this->assertStringNotContainsString('DATE_FORMAT', $expr);
+    }
+
     public function testDateExpressionAlwaysOperatesOnCreatedAt(): void
     {
         // Whichever driver: the column being grouped on must always be
         // created_at — a refactor that breaks this would silently drop the
         // time-series chart on the dashboard.
-        foreach (['mysql', 'sqlite', 'pgsql', 'mariadb'] as $driver) {
+        foreach (['mysql', 'sqlite', 'pgsql', 'sqlsrv', 'mariadb'] as $driver) {
             $expr = UsageAggregator::dateExpression($driver);
             $this->assertStringContainsString(
                 'created_at',
@@ -388,5 +396,19 @@ class UsageAggregatorTest extends TestCase
         // Frontend code keys on this string; it MUST stay stable across
         // refactors or stacked-area charts will break their legend.
         $this->assertSame('__other__', UsageAggregator::OTHER_BUCKET);
+    }
+
+    public function testSeriesByDimensionDoesNotFilterOnSelectAliasInHaving(): void
+    {
+        // SQL Server and PostgreSQL evaluate HAVING before SELECT, so
+        // `having requests > 0` (a SELECT alias) fails with "invalid column".
+        // The query can't be built without a database, so pin the source.
+        $method = new \ReflectionMethod(UsageAggregator::class, 'seriesByDimension');
+        $lines = array_slice(
+            file((string) $method->getFileName()),
+            $method->getStartLine() - 1,
+            $method->getEndLine() - $method->getStartLine() + 1
+        );
+        $this->assertStringNotContainsString("having('requests'", implode('', $lines));
     }
 }
