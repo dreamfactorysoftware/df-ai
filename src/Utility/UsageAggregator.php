@@ -631,7 +631,6 @@ class UsageAggregator
             )
             ->groupBy(\DB::raw($dateExpr))
             ->orderBy(\DB::raw($dateExpr))
-            ->having('requests', '>', 0)
             ->get();
 
         $otherTagged = [];

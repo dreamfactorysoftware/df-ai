@@ -397,4 +397,18 @@ class UsageAggregatorTest extends TestCase
         // refactors or stacked-area charts will break their legend.
         $this->assertSame('__other__', UsageAggregator::OTHER_BUCKET);
     }
+
+    public function testSeriesByDimensionDoesNotFilterOnSelectAliasInHaving(): void
+    {
+        // SQL Server and PostgreSQL evaluate HAVING before SELECT, so
+        // `having requests > 0` (a SELECT alias) fails with "invalid column".
+        // The query can't be built without a database, so pin the source.
+        $method = new \ReflectionMethod(UsageAggregator::class, 'seriesByDimension');
+        $lines = array_slice(
+            file((string) $method->getFileName()),
+            $method->getStartLine() - 1,
+            $method->getEndLine() - $method->getStartLine() + 1
+        );
+        $this->assertStringNotContainsString("having('requests'", implode('', $lines));
+    }
 }
