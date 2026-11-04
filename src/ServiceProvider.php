@@ -4,6 +4,8 @@ namespace DreamFactory\Core\AI;
 
 use DreamFactory\Core\AI\Commands\PrunePromptLogs;
 use DreamFactory\Core\AI\Commands\PruneUsageLogs;
+use DreamFactory\Core\AI\Http\Controllers\InternalAliasController;
+use DreamFactory\Core\AI\Http\Controllers\InternalBudgetController;
 use DreamFactory\Core\AI\Http\Controllers\InternalUsageController;
 use DreamFactory\Core\AI\Http\Controllers\OpenAiCompatController;
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
@@ -68,6 +70,16 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
             // events for Logstash http_poller / Splunk HTTP / Datadog
             // HTTP intake / any pull-based SIEM pipeline.
             Route::get('_internal/ai/audit-stream', [InternalUsageController::class, 'auditStream']);
+
+            Route::get('_internal/ai/budgets', [InternalBudgetController::class, 'index']);
+            Route::post('_internal/ai/budgets', [InternalBudgetController::class, 'store']);
+            Route::patch('_internal/ai/budgets/{id}', [InternalBudgetController::class, 'update'])->whereNumber('id');
+            Route::delete('_internal/ai/budgets/{id}', [InternalBudgetController::class, 'destroy'])->whereNumber('id');
+
+            Route::get('_internal/ai/aliases', [InternalAliasController::class, 'index']);
+            Route::post('_internal/ai/aliases', [InternalAliasController::class, 'store']);
+            Route::patch('_internal/ai/aliases/{id}', [InternalAliasController::class, 'update'])->whereNumber('id');
+            Route::delete('_internal/ai/aliases/{id}', [InternalAliasController::class, 'destroy'])->whereNumber('id');
 
             // OpenAI-compatible drop-in endpoint. Customer apps point
             // OPENAI_BASE_URL at /api/v2/_ai/v1 and they're done. Same

@@ -25,7 +25,11 @@ class AiBudget extends Model
         'is_active',
     ];
 
+    /** Credential: never serialized. Use hasAlertWebhookAuth() to report it. */
+    protected $hidden = ['alert_webhook_auth_header'];
+
     protected $casts = [
+        'alert_webhook_auth_header' => 'encrypted',
         'dimension_id'        => 'integer',
         'budget_usd'          => 'float',
         'hard_stop'           => 'boolean',
@@ -34,4 +38,10 @@ class AiBudget extends Model
         'last_alerted_80_at'  => 'datetime',
         'last_alerted_100_at' => 'datetime',
     ];
+
+    /** Reads the stored value without decrypting it. */
+    public function hasAlertWebhookAuth(): bool
+    {
+        return !empty($this->getRawOriginal('alert_webhook_auth_header'));
+    }
 }
