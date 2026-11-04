@@ -134,6 +134,10 @@ class UsageLogger
                 'status'          => $status,
                 'error_message'   => $errorMessage,
                 'request_id'      => self::requestId(),
+                // Set here, not by the column default: budget and dashboard
+                // windows come from this clock, and the database clock can
+                // sit in another time zone.
+                'created_at'      => now(),
             ]);
         } catch (\Throwable $e) {
             Log::warning('Failed to log AI usage: ' . $e->getMessage());

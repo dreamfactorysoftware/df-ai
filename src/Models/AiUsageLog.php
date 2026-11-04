@@ -11,6 +11,7 @@ class AiUsageLog extends Model
     public $timestamps = false;
 
     protected $fillable = [
+        'created_at',
         'service_id',
         'user_id',
         'role_id',

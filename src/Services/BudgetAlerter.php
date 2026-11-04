@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DreamFactory\Core\AI\Services;
 
 use DreamFactory\Core\AI\Models\AiBudget;
+use DreamFactory\Core\Utility\Session;
 use GuzzleHttp\Client;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
@@ -41,6 +42,20 @@ class BudgetAlerter
         $now = Carbon::now();
         foreach (BudgetEnforcer::matchingBudgets($serviceId, $userId, $roleId, $appId) as $budget) {
             self::evaluateBudget($budget, $now);
+        }
+    }
+
+    /**
+     * afterCall() for the calling session. Never throws: the provider call
+     * already succeeded and was billed, so an alerting failure must not
+     * turn it into an error.
+     */
+    public static function afterRequest(int $serviceId): void
+    {
+        try {
+            self::afterCall($serviceId, Session::getCurrentUserId(), Session::getRoleId(), Session::get('app.id'));
+        } catch (\Throwable $e) {
+            Log::warning('AI budget alert check failed: ' . $e->getMessage(), ['service_id' => $serviceId]);
         }
     }
 
@@ -129,12 +144,14 @@ class BudgetAlerter
     {
         $payload = self::buildPayload($budget, $pct, $spend, $cap);
 
-        $headers = ['Content-Type' => 'application/json'];
-        if (!empty($budget->alert_webhook_auth_header)) {
-            $headers['Authorization'] = (string) $budget->alert_webhook_auth_header;
-        }
-
         try {
+            // Inside the try: reading the header decrypts it, and that
+            // throws if APP_KEY changed after the header was stored.
+            $headers = ['Content-Type' => 'application/json'];
+            if (!empty($budget->alert_webhook_auth_header)) {
+                $headers['Authorization'] = (string) $budget->alert_webhook_auth_header;
+            }
+
             self::client()->request('POST', (string) $budget->alert_webhook_url, [
                 'json'    => $payload,
                 'headers' => $headers,
@@ -151,7 +168,9 @@ class BudgetAlerter
     private static function client(): Client
     {
         if (self::$client === null) {
-            self::$client = new Client(['timeout' => 5]);
+            // No redirects: a redirect would resend the payload, and could
+            // resend the auth header, to a URL no admin configured.
+            self::$client = new Client(['timeout' => 5, 'connect_timeout' => 3, 'allow_redirects' => false]);
         }
         return self::$client;
     }

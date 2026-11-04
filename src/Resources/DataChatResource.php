@@ -7,7 +7,10 @@ namespace DreamFactory\Core\AI\Resources;
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
 use DreamFactory\Core\AI\Providers\AiProviderInterface;
 use DreamFactory\Core\AI\Providers\ToolDefinition;
+use DreamFactory\Core\AI\Services\BudgetAlerter;
+use DreamFactory\Core\AI\Services\BudgetEnforcer;
 use DreamFactory\Core\AI\Services\RateLimiter;
+use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Enums\ServiceTypeGroups;
 use DreamFactory\Core\Enums\VerbsMask;
 use DreamFactory\Core\Exceptions\BadRequestException;
@@ -145,6 +148,9 @@ class DataChatResource extends BaseRestResource
         // up to DEFAULT_MAX_TOOL_ITERATIONS provider calls, so an unthrottled burst
         // amplifies provider cost.
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
+        // ponytail: one check per request, so a loop can pass the cap by up to
+        // max_iterations calls. Move this into the loop if that overshoot matters.
+        BudgetEnforcer::enforce($service->getServiceId());
 
         // Build tool definitions only for database services this role can access.
         $dbServices = $this->getDatabaseServicesForRole($roleId);
@@ -187,6 +193,25 @@ class DataChatResource extends BaseRestResource
     // Agentic loop
     // ────────────────────────────────────────────────────────
 
+    /**
+     * One ai_usage_log row per provider call, so budgets count Data Chat
+     * spend, then the threshold alerts for the new total.
+     */
+    protected function recordProviderCall(AiProviderInterface $provider, array $result, int $callStart): void
+    {
+        $serviceId = $this->getService()->getServiceId();
+
+        UsageLogger::logSuccess($serviceId, self::RESOURCE_NAME, [
+            'provider'        => $result['provider'] ?? $provider->getProviderName(),
+            'model'           => $result['model'] ?? '',
+            'input_tokens'    => (int) ($result['input_tokens'] ?? 0),
+            'output_tokens'   => (int) ($result['output_tokens'] ?? 0),
+            'tool_call_count' => count($result['tool_calls'] ?? []),
+        ], (int) ((hrtime(true) - $callStart) / 1_000_000));
+
+        BudgetAlerter::afterRequest($serviceId);
+    }
+
     private function runAgenticLoop(
         AiProviderInterface $provider,
         array $messages,
@@ -214,18 +239,24 @@ class DataChatResource extends BaseRestResource
         }
 
         for ($iteration = 0; $iteration < $maxIterations; $iteration++) {
+            $callStart = hrtime(true);
+
             try {
                 $result = $provider->chatWithTools($messages, $tools, $options);
             } catch (\LogicException $e) {
                 // Provider doesn't support tool calling — fall back to regular chat.
+                $chat = $provider->chat($messages, $options);
                 $result = [
-                    'content'       => $provider->chat($messages, $options)['content'] ?? '',
+                    'content'       => $chat['content'] ?? '',
                     'tool_calls'    => null,
                     'finish_reason' => 'stop',
-                    'input_tokens'  => 0,
-                    'output_tokens' => 0,
+                    'input_tokens'  => $chat['input_tokens'] ?? 0,
+                    'output_tokens' => $chat['output_tokens'] ?? 0,
+                    'model'         => $chat['model'] ?? '',
                 ];
             }
+
+            $this->recordProviderCall($provider, $result, $callStart);
 
             $totalInputTokens += $result['input_tokens'] ?? 0;
             $totalOutputTokens += $result['output_tokens'] ?? 0;

@@ -7,6 +7,8 @@ namespace DreamFactory\Core\AI\Services;
 use DreamFactory\Core\AI\Exceptions\AiProviderException;
 use DreamFactory\Core\AI\Models\AiBudget;
 use DreamFactory\Core\AI\Models\AiUsageLog;
+use DreamFactory\Core\Exceptions\TooManyRequestsException;
+use DreamFactory\Core\Utility\Session;
 use Illuminate\Support\Carbon;
 
 /**
@@ -73,6 +75,44 @@ class BudgetEnforcer
                 );
             }
         }
+    }
+
+    /**
+     * REST entry point: check the calling session and refuse with HTTP 429.
+     *
+     * The caller's session is the same attribution UsageLogger records, so
+     * the spend a budget sums is the spend this check is made against. Run
+     * it outside any try block that logs errors and outside FallbackChain:
+     * a refused call adds no usage row and tries no other connection.
+     *
+     * @throws TooManyRequestsException
+     */
+    public static function enforce(int $serviceId): void
+    {
+        try {
+            self::checkSession($serviceId);
+        } catch (AiProviderException $e) {
+            throw new TooManyRequestsException($e->getMessage());
+        }
+    }
+
+    /**
+     * Whether the calling session is at a hard cap on this connection.
+     * FallbackChain uses this to skip a capped fallback connection.
+     */
+    public static function isBlocked(int $serviceId): bool
+    {
+        try {
+            self::checkSession($serviceId);
+            return false;
+        } catch (AiProviderException) {
+            return true;
+        }
+    }
+
+    private static function checkSession(int $serviceId): void
+    {
+        self::check($serviceId, Session::getCurrentUserId(), Session::getRoleId(), Session::get('app.id'));
     }
 
     /**
