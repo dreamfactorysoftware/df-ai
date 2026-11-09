@@ -92,6 +92,16 @@ class UsageLoggerTest extends TestCase
         $this->assertNotSame($first, $second, 'Distinct PHP requests must get distinct request ids');
     }
 
+    public function testRequestIdNeverExceedsTheColumnWidth(): void
+    {
+        // The same id goes to ai_usage_log and ai_prompt_log, both 36 wide.
+        // A 64 character trace id from the request header used to make both
+        // inserts fail: no spend counted and no prompt audit row.
+        UsageLogger::setRequestId(str_repeat('a', 30) . str_repeat('b', 34));
+
+        $this->assertSame(str_repeat('a', 30) . str_repeat('b', 6), UsageLogger::requestId());
+    }
+
     public function testFitColumnsCutsALongTraceIdToTheColumnWidth(): void
     {
         // TraceId accepts 8 to 64 characters from the X-DreamFactory-Trace-Id

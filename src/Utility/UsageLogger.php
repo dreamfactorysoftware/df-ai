@@ -98,7 +98,7 @@ class UsageLogger
      */
     public static function setRequestId(string $id): void
     {
-        self::$requestId = $id;
+        self::$requestId = self::fitRequestId($id);
     }
 
     public static function requestId(): string
@@ -106,9 +106,20 @@ class UsageLogger
         if (self::$requestId === null) {
             // Default to the platform trace id so ai_usage_log/ai_prompt_log rows
             // join with mcp_request_log and every other hop of the same action.
-            self::$requestId = \DreamFactory\Core\Utility\TraceId::get();
+            self::$requestId = self::fitRequestId(\DreamFactory\Core\Utility\TraceId::get());
         }
         return self::$requestId;
+    }
+
+    /**
+     * Every table that stores this id holds 36 characters (ai_usage_log,
+     * ai_prompt_log). A caller can send a trace id of up to 64. Cut it here,
+     * once, so the usage row and the prompt audit row are both written and
+     * still carry the same id.
+     */
+    private static function fitRequestId(string $id): string
+    {
+        return substr($id, 0, self::COLUMN_WIDTHS['request_id']);
     }
 
     /**
