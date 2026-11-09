@@ -148,8 +148,7 @@ class DataChatResource extends BaseRestResource
         // up to DEFAULT_MAX_TOOL_ITERATIONS provider calls, so an unthrottled burst
         // amplifies provider cost.
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
-        // ponytail: one check per request, so a loop can pass the cap by up to
-        // max_iterations calls. Move this into the loop if that overshoot matters.
+        // Checked again before each further provider call in the loop.
         BudgetEnforcer::enforce($service->getServiceId());
 
         // Build tool definitions only for database services this role can access.
@@ -238,7 +237,26 @@ class DataChatResource extends BaseRestResource
             $options['temperature'] = (float) $payload['temperature'];
         }
 
+        $serviceId = $this->getService()->getServiceId();
+
         for ($iteration = 0; $iteration < $maxIterations; $iteration++) {
+            // handlePOST() checked the cap once. Every further provider call
+            // is new spend, so a tool loop must not run on past a hard stop.
+            if ($iteration > 0 && BudgetEnforcer::isBlocked($serviceId)) {
+                return [
+                    'content'        => 'The AI budget was reached before a final answer. No further AI requests were made.',
+                    'toolCallsMade'  => $toolCallsMade,
+                    'messages'       => $messages,
+                    'provider'       => $provider->getProviderName(),
+                    'model'          => '',
+                    'inputTokens'    => $totalInputTokens,
+                    'outputTokens'   => $totalOutputTokens,
+                    'latencyMs'      => (int) ((hrtime(true) - $startTime) / 1_000_000),
+                    'iterations'     => $iteration,
+                    'budgetExceeded' => true,
+                ];
+            }
+
             $callStart = hrtime(true);
 
             try {
