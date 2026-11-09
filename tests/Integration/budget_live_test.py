@@ -261,7 +261,7 @@ def test_api(stack, primary, key):
         check(f"3. {name} 400", status == 400, f"{status} {raw[:120]}")
 
     print("API: webhook auth header")
-    status, row, raw = stack.admin("POST", "/_internal/ai/budgets", {**good, "alert_webhook_url": "http://x.test/h", "alert_webhook_auth_header": SECRET})
+    status, row, raw = stack.admin("POST", "/_internal/ai/budgets", {**good, "alert_webhook_url": "http://127.0.0.1:9/h", "alert_webhook_auth_header": SECRET})
     budget_id = row["id"]
     check("4. create hides header", SECRET not in raw and "alert_webhook_auth_header" not in row and row["has_alert_webhook_auth"] is True)
     raw = stack.admin("GET", "/_internal/ai/budgets")[2]
