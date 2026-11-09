@@ -10,6 +10,7 @@ use DreamFactory\Core\AI\Http\Controllers\InternalUsageController;
 use DreamFactory\Core\AI\Http\Controllers\OpenAiCompatController;
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
 use DreamFactory\Core\AI\Services\AiConnection;
+use DreamFactory\Core\AI\Services\BudgetAccess;
 use DreamFactory\Core\Enums\LicenseLevel;
 use DreamFactory\Core\Enums\ServiceTypeGroups;
 use DreamFactory\Core\Services\ServiceManager;
@@ -71,15 +72,20 @@ class ServiceProvider extends \Illuminate\Support\ServiceProvider
             // HTTP intake / any pull-based SIEM pipeline.
             Route::get('_internal/ai/audit-stream', [InternalUsageController::class, 'auditStream']);
 
-            Route::get('_internal/ai/budgets', [InternalBudgetController::class, 'index']);
-            Route::post('_internal/ai/budgets', [InternalBudgetController::class, 'store']);
-            Route::patch('_internal/ai/budgets/{id}', [InternalBudgetController::class, 'update'])->whereNumber('id');
-            Route::delete('_internal/ai/budgets/{id}', [InternalBudgetController::class, 'destroy'])->whereNumber('id');
+            // Budget and alias management. Not registered while the switch
+            // is off, so the routes answer 404 and the admin UI hides the
+            // screens. BudgetAccess decides who may call them when it is on.
+            if (BudgetAccess::managementEnabled()) {
+                Route::get('_internal/ai/budgets', [InternalBudgetController::class, 'index']);
+                Route::post('_internal/ai/budgets', [InternalBudgetController::class, 'store']);
+                Route::patch('_internal/ai/budgets/{id}', [InternalBudgetController::class, 'update'])->whereNumber('id');
+                Route::delete('_internal/ai/budgets/{id}', [InternalBudgetController::class, 'destroy'])->whereNumber('id');
 
-            Route::get('_internal/ai/aliases', [InternalAliasController::class, 'index']);
-            Route::post('_internal/ai/aliases', [InternalAliasController::class, 'store']);
-            Route::patch('_internal/ai/aliases/{id}', [InternalAliasController::class, 'update'])->whereNumber('id');
-            Route::delete('_internal/ai/aliases/{id}', [InternalAliasController::class, 'destroy'])->whereNumber('id');
+                Route::get('_internal/ai/aliases', [InternalAliasController::class, 'index']);
+                Route::post('_internal/ai/aliases', [InternalAliasController::class, 'store']);
+                Route::patch('_internal/ai/aliases/{id}', [InternalAliasController::class, 'update'])->whereNumber('id');
+                Route::delete('_internal/ai/aliases/{id}', [InternalAliasController::class, 'destroy'])->whereNumber('id');
+            }
 
             // OpenAI-compatible drop-in endpoint. Customer apps point
             // OPENAI_BASE_URL at /api/v2/_ai/v1 and they're done. Same

@@ -5,16 +5,17 @@ declare(strict_types=1);
 namespace DreamFactory\Core\AI\Http\Controllers;
 
 use DreamFactory\Core\AI\Models\AiBudget;
+use DreamFactory\Core\AI\Services\BudgetAccess;
 use DreamFactory\Core\AI\Services\BudgetEnforcer;
 use DreamFactory\Core\Http\Controllers\Controller;
-use DreamFactory\Core\Utility\Session;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
 /**
- * Sysadmin CRUD for ai_budget rules, under /_internal/ai/budgets.
+ * Admin CRUD for ai_budget rules, under /_internal/ai/budgets. BudgetAccess
+ * decides who may call it.
  *
  * alert_webhook_auth_header is write-only. Responses carry
  * has_alert_webhook_auth instead. An empty value on PATCH keeps the stored
@@ -125,7 +126,9 @@ class InternalBudgetController extends Controller
 
     private function denyNonAdmin(): ?JsonResponse
     {
-        return Session::isSysAdmin() ? null : $this->error(403, 'Admin access required.');
+        $reason = BudgetAccess::denial();
+
+        return $reason === null ? null : $this->error(403, $reason);
     }
 
     private function error(int $status, string $message): JsonResponse
@@ -203,7 +206,8 @@ class InternalBudgetController extends Controller
             'has_alert_webhook_auth' => $budget->hasAlertWebhookAuth(),
             'spent_usd'              => round($spent, 6),
             'remaining_usd'          => round(max(0, $cap - $spent), 6),
-            'utilization'            => round($spent / $cap, 4),
+            // A row written straight to the database can have a zero cap.
+            'utilization'            => $cap > 0 ? round($spent / $cap, 4) : 0.0,
             'blocking'               => $budget->is_active && $budget->hard_stop && $spent >= $cap,
         ];
     }

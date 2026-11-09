@@ -5,15 +5,16 @@ declare(strict_types=1);
 namespace DreamFactory\Core\AI\Http\Controllers;
 
 use DreamFactory\Core\AI\Models\AiModelAlias;
+use DreamFactory\Core\AI\Services\BudgetAccess;
 use DreamFactory\Core\Http\Controllers\Controller;
-use DreamFactory\Core\Utility\Session;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
 /**
- * Sysadmin CRUD for ai_model_alias, under /_internal/ai/aliases.
+ * Admin CRUD for ai_model_alias, under /_internal/ai/aliases. BudgetAccess
+ * decides who may call it.
  *
  * DELETE deactivates the row. Aliases appear in past usage rows, and an
  * inactive alias already stops resolving, so nothing needs a hard delete.
@@ -83,7 +84,9 @@ class InternalAliasController extends Controller
 
     private function denyNonAdmin(): ?JsonResponse
     {
-        return Session::isSysAdmin() ? null : $this->error(403, 'Admin access required.');
+        $reason = BudgetAccess::denial();
+
+        return $reason === null ? null : $this->error(403, $reason);
     }
 
     private function error(int $status, string $message): JsonResponse
@@ -99,7 +102,7 @@ class InternalAliasController extends Controller
             'service_id'     => 'required|integer',
             'physical_model' => 'required|string|max:128',
             'label'          => 'nullable|string|max:256',
-            'description'    => 'nullable|string',
+            'description'    => 'nullable|string|max:2000',
             'is_active'      => 'sometimes|boolean',
         ]);
         if ($validator->fails()) {
