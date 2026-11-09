@@ -7,6 +7,7 @@ namespace DreamFactory\Core\AI\Http\Controllers;
 use DreamFactory\Core\AI\Models\AiBudget;
 use DreamFactory\Core\AI\Services\BudgetAccess;
 use DreamFactory\Core\AI\Services\BudgetEnforcer;
+use DreamFactory\Core\AI\Services\WebhookGuard;
 use DreamFactory\Core\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -53,6 +54,8 @@ class InternalBudgetController extends Controller
             'resource'              => $budgets->map(fn(AiBudget $b) => $this->present($b))->all(),
             // Spend comes from ai_usage_log, so with logging off no cap can trip.
             'usage_logging_enabled' => (bool) config('df-ai.usage_logging.enabled', true),
+            // Off by default. While off, a rule cannot carry a webhook URL.
+            'alert_webhooks_enabled' => WebhookGuard::enabled(),
         ]);
     }
 
@@ -168,6 +171,13 @@ class InternalBudgetController extends Controller
 
         $data['dimension_id'] = $type === 'global' ? null : (int) $dimensionId;
         $data['alert_webhook_url'] = ($data['alert_webhook_url'] ?? null) ?: null;
+
+        // Only a URL this request sends is checked. A stored URL must not
+        // block an unrelated PATCH, and it is checked again before each send.
+        if ($request->filled('alert_webhook_url')
+            && ($refused = WebhookGuard::rejection((string) $data['alert_webhook_url']))) {
+            return $this->error(400, $refused);
+        }
 
         return $data;
     }

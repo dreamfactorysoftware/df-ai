@@ -47,6 +47,16 @@ return [
         // aliases: 'sysadmin' is full administrators only. 'admin' also lets
         // in restricted administrators (an admin limited to some tabs).
         'manage_access' => env('DF_AI_BUDGET_MANAGE_ACCESS', 'sysadmin'),
+
+        // Open question 3 (webhook default). Alert webhooks are off until an
+        // operator turns them on. When on, a URL must be http or https with no
+        // embedded credentials, and its host must resolve to public addresses
+        // only. Name an internal receiver in allowed_hosts (comma separated)
+        // to permit it. With allowed_hosts set, only those hosts are accepted.
+        'webhooks' => [
+            'enabled'       => env('DF_AI_BUDGET_WEBHOOKS_ENABLED', false),
+            'allowed_hosts' => env('DF_AI_BUDGET_WEBHOOK_ALLOWED_HOSTS', ''),
+        ],
     ],
 
     // Data Chat settings

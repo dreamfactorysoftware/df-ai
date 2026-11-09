@@ -70,6 +70,11 @@ class BudgetAlerter
         if (!$budget->is_active || empty($budget->alert_webhook_url)) {
             return; // Nothing to alert to.
         }
+        if (!WebhookGuard::enabled()) {
+            // Alert webhooks are off on this server. Leave the thresholds
+            // unmarked so the alerts fire once an operator turns them on.
+            return;
+        }
 
         $now = $now ?? Carbon::now();
         $spend = BudgetEnforcer::spendForBudget($budget, $now);
@@ -152,7 +157,12 @@ class BudgetAlerter
                 $headers['Authorization'] = (string) $budget->alert_webhook_auth_header;
             }
 
-            self::client()->request('POST', (string) $budget->alert_webhook_url, [
+            // Checked again here, not only when the rule was saved: the host
+            // can resolve somewhere else by now, and rows written before the
+            // check existed were never checked. Throws when refused.
+            $pinned = WebhookGuard::requestOptions((string) $budget->alert_webhook_url);
+
+            self::client()->request('POST', (string) $budget->alert_webhook_url, $pinned + [
                 'json'    => $payload,
                 'headers' => $headers,
                 'timeout' => 5,
