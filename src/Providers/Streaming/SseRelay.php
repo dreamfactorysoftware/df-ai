@@ -23,6 +23,9 @@ namespace DreamFactory\Core\AI\Providers\Streaming;
  */
 class SseRelay
 {
+    /** How long drive() keeps reading for token counts after the client leaves. */
+    public const DEFAULT_DRAIN_SECONDS = 30.0;
+
     /**
      * Emit one OpenAI-shape SSE frame line for a unified provider event.
      * Returns `null` when the event has no wire representation (used for
@@ -111,8 +114,12 @@ class SseRelay
      * - Always returns the totals dict, even if the iterator throws.
      * - Returns status='success' when the stream emitted a `done` event.
      * - Returns status='partial' when the loop exited via abort (sink
-     *   reported the connection was lost) — billing should record what
-     *   was counted so far.
+     *   reported the connection was lost). Token counts arrive at the end
+     *   of a stream, so after an abort the loop keeps reading the provider,
+     *   without writing, until the counts arrive or $drainSeconds pass. A
+     *   client must not get an uncounted response by hanging up early.
+     * - Never returns zero tokens for a stream that delivered text: when
+     *   the provider sent no counts, output tokens are estimated.
      * - Returns status='error' with a message when an `error` event was
      *   surfaced or the iterator threw.
      *
@@ -127,13 +134,29 @@ class SseRelay
      *     error_message: ?string,
      * }
      */
-    public static function drive(\Generator $events, callable $sink, string $providerName, string $model, string $chatId): array
-    {
+    public static function drive(
+        \Generator $events,
+        callable $sink,
+        string $providerName,
+        string $model,
+        string $chatId,
+        float $drainSeconds = self::DEFAULT_DRAIN_SECONDS,
+    ): array {
+        // PHP ends the script on the first failed write to a closed client
+        // unless told otherwise, and that skips every `finally` block. The
+        // caller writes the usage row in one, so a client that hangs up
+        // would be served for free and never counted against a budget.
+        ignore_user_abort(true);
+
         $inputTokens = 0;
         $outputTokens = 0;
         $finishReason = null;
         $errorMessage = null;
         $status = 'partial'; // Pessimistic default: only flip to success on `done`.
+        $usageSeen = false;
+        $generatedChars = 0;
+        $aborted = false;
+        $drainDeadline = null; // Set once the client has gone away.
 
         try {
             foreach ($events as $event) {
@@ -142,6 +165,20 @@ class SseRelay
                 if (($event['type'] ?? '') === 'usage') {
                     $inputTokens = (int) ($event['input_tokens'] ?? 0);
                     $outputTokens = (int) ($event['output_tokens'] ?? 0);
+                    $usageSeen = true;
+                }
+                if (($event['type'] ?? '') === 'delta') {
+                    $generatedChars += mb_strlen((string) ($event['text'] ?? ''));
+                }
+
+                if ($drainDeadline !== null) {
+                    // Client is gone. Providers report token counts in the
+                    // last frames of a stream, so keep reading, without
+                    // writing, until the counts arrive or the time runs out.
+                    if ($usageSeen || microtime(true) >= $drainDeadline) {
+                        break;
+                    }
+                    continue;
                 }
                 if (($event['type'] ?? '') === 'finish') {
                     $finishReason = (string) ($event['reason'] ?? 'stop');
@@ -158,9 +195,16 @@ class SseRelay
 
                 $shouldContinue = $sink($rendered);
                 if (!$shouldContinue) {
-                    // Caller signalled the client disconnected. Stop pulling
-                    // more from the provider — there's no one to send to.
-                    return self::result('partial', $inputTokens, $outputTokens, $finishReason, $errorMessage);
+                    // Caller signalled the client disconnected. With the
+                    // counts in hand there is nothing left to wait for.
+                    // Without them, drain: the provider bills the tokens
+                    // either way, so the usage row must carry them.
+                    $aborted = true;
+                    if ($usageSeen || $drainSeconds <= 0) {
+                        break;
+                    }
+                    $drainDeadline = microtime(true) + $drainSeconds;
+                    continue;
                 }
 
                 if (($event['type'] ?? '') === 'done' && $status !== 'error') {
@@ -175,7 +219,25 @@ class SseRelay
             $errorMessage = $e->getMessage();
         }
 
+        if ($aborted) {
+            $status = 'partial';
+        }
+
+        // Text was generated but no token counts came back: the client left and
+        // the drain ran out, or the upstream server never reports usage on
+        // streams. Zero tokens would log $0 and no budget would ever move, so
+        // bill an estimate of the output instead (about 4 characters a token).
+        if ($status !== 'error' && $inputTokens === 0 && $outputTokens === 0 && $generatedChars > 0) {
+            $outputTokens = self::estimateTokens($generatedChars);
+        }
+
         return self::result($status, $inputTokens, $outputTokens, $finishReason, $errorMessage);
+    }
+
+    /** Rough token count for text whose real count the provider never sent. */
+    public static function estimateTokens(int $characters): int
+    {
+        return (int) ceil(max(0, $characters) / 4);
     }
 
     /** @return array{status: string, input_tokens: int, output_tokens: int, finish_reason: ?string, error_message: ?string} */
