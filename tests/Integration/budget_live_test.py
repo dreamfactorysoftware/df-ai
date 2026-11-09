@@ -8,6 +8,13 @@ token counts, which test 8 needs to step through 50, 80 and 100 percent.
 
     DF_URL=http://localhost:8081 python3 tests/Integration/budget_live_test.py
 
+The stack must run with these settings, or the preflight stops the run:
+    DF_AI_BUDGET_MANAGEMENT_ENABLED=true
+    DF_AI_BUDGET_WEBHOOKS_ENABLED=true
+    DF_AI_BUDGET_WEBHOOK_ALLOWED_HOSTS=host.docker.internal,127.0.0.1
+        (PROXY_HOST, plus 127.0.0.1 for the dead-webhook check)
+    a GOLD license, or DF_AI_BUDGET_REQUIRED_LICENSE set to the stack's tier
+
 Creates its own services, roles, apps, a user and usage rows, and removes
 them on exit. Set DF_CONTAINER to the web container: the fallback chain has no
 API, and cleanup removes usage rows, so both go through artisan tinker.
@@ -422,12 +429,27 @@ def test_dimensions(stack, primary, fallback, send, key, app_id, other_key, user
     stack.admin("DELETE", f"/_internal/ai/budgets/{budget_id}")
 
 
+def preflight(stack):
+    """Stop with the reason when the stack's settings would fail every check."""
+    status, listing, raw = stack.admin("GET", "/_internal/ai/budgets")
+    if status == 404:
+        sys.exit("Budget management is off on this stack: set DF_AI_BUDGET_MANAGEMENT_ENABLED=true.")
+    if status == 403:
+        sys.exit(f"The admin may not manage budgets on this stack: {raw[:200]}")
+    if status != 200:
+        sys.exit(f"GET /_internal/ai/budgets returned {status}: {raw[:200]}")
+    if listing.get("alert_webhooks_enabled") is False:
+        sys.exit("Alert webhooks are off on this stack: set DF_AI_BUDGET_WEBHOOKS_ENABLED=true and "
+                 f"DF_AI_BUDGET_WEBHOOK_ALLOWED_HOSTS={PROXY_HOST},127.0.0.1.")
+
+
 def main():
     for offset, connection in enumerate(counts):
         server = ThreadingHTTPServer(("0.0.0.0", PROXY_PORT + offset), Proxy)
         server.connection = connection
         threading.Thread(target=server.serve_forever, daemon=True).start()
     stack = Stack()
+    preflight(stack)
     try:
         primary, fallback = stack.connection("primary"), stack.connection("fallback")
         tinker(f"DB::table('ai_connection_config')->where('service_id',{primary})->update(['fallback_service_ids'=>'[{fallback}]']);")
