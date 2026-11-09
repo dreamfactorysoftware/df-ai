@@ -20,7 +20,8 @@ use Illuminate\Support\Facades\Validator;
  *
  * alert_webhook_auth_header is write-only. Responses carry
  * has_alert_webhook_auth instead. An empty value on PATCH keeps the stored
- * header; clear_alert_webhook_auth=true removes it.
+ * header; clear_alert_webhook_auth=true removes it, and so does moving the
+ * URL to another host without sending a new header.
  */
 class InternalBudgetController extends Controller
 {
@@ -198,11 +199,44 @@ class InternalBudgetController extends Controller
 
     private function applyAuthHeader(AiBudget $budget, Request $request): void
     {
-        if ($request->boolean('clear_alert_webhook_auth')) {
+        self::resolveAuthHeader(
+            $budget,
+            $request->boolean('clear_alert_webhook_auth'),
+            (string) $request->input('alert_webhook_auth_header', ''),
+        );
+    }
+
+    /**
+     * Decide the stored webhook auth header after the other fields are
+     * filled. The header is write-only, so nobody who edits a rule can read
+     * it. It was entered for one receiver: when the URL moves to another
+     * scheme, host or port and no new header comes with it, the stored one
+     * is dropped. Otherwise an editor could point the URL at a server of
+     * their own and collect a secret they were never shown.
+     */
+    public static function resolveAuthHeader(AiBudget $budget, bool $clear, string $newHeader): void
+    {
+        if ($clear) {
             $budget->alert_webhook_auth_header = null;
-        } elseif ((string) $request->input('alert_webhook_auth_header', '') !== '') {
-            $budget->alert_webhook_auth_header = (string) $request->input('alert_webhook_auth_header');
+        } elseif ($newHeader !== '') {
+            $budget->alert_webhook_auth_header = $newHeader;
+        } elseif ($budget->exists && $budget->hasAlertWebhookAuth()
+            && self::origin($budget->getOriginal('alert_webhook_url')) !== self::origin($budget->alert_webhook_url)) {
+            $budget->alert_webhook_auth_header = null;
         }
+    }
+
+    /** scheme://host:port of a URL, lower-case, or '' when there is none. */
+    private static function origin(?string $url): string
+    {
+        $parts = parse_url((string) $url) ?: [];
+        if (empty($parts['host'])) {
+            return '';
+        }
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+        $port = (int) ($parts['port'] ?? ($scheme === 'https' ? 443 : 80));
+
+        return $scheme . '://' . strtolower($parts['host']) . ':' . $port;
     }
 
     /** @return array<string, mixed> */

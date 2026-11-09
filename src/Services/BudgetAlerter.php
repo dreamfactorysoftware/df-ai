@@ -93,13 +93,33 @@ class BudgetAlerter
                 continue;
             }
             $last = $budget->{$column};
-            if ($last === null || $last->lt($periodStart)) {
+            if (($last === null || $last->lt($periodStart))
+                && self::claimThreshold($budget, $column, $periodStart, $now)) {
                 self::fireAlert($budget, $pct, $spend, $cap);
-                $budget->{$column} = $now;
-                $budget->save();
             }
             return; // Only fire the highest crossed threshold per call.
         }
+    }
+
+    /**
+     * Mark the threshold as alerted, in the database, and report whether
+     * this call was the one that marked it. Two requests can both load the
+     * budget before either marks it. Only the one whose update lands sends
+     * the alert, so a threshold is announced once.
+     */
+    private static function claimThreshold(AiBudget $budget, string $column, Carbon $periodStart, Carbon $now): bool
+    {
+        $claimed = AiBudget::query()
+            ->whereKey($budget->getKey())
+            ->where(function ($q) use ($column, $periodStart) {
+                $q->whereNull($column)->orWhere($column, '<', $periodStart);
+            })
+            ->update([$column => $now]);
+
+        $budget->setAttribute($column, $now);
+        $budget->syncOriginalAttribute($column);
+
+        return $claimed > 0;
     }
 
     /**
