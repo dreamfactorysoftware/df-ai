@@ -127,7 +127,9 @@ class UsageRates
     ): float {
         $in = max(0, $inputTokens);
         $out = max(0, $outputTokens);
-        return ($in / 1000) * $inputPer1k + ($out / 1000) * $outputPer1k;
+        // A negative rate would log negative cost and lower the spend a
+        // budget sums, so a misconfigured rate sheet could lift a cap.
+        return ($in / 1000) * max(0.0, $inputPer1k) + ($out / 1000) * max(0.0, $outputPer1k);
     }
 
     /**
