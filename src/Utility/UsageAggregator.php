@@ -6,6 +6,7 @@ namespace DreamFactory\Core\AI\Utility;
 
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
 use DreamFactory\Core\AI\Models\AiUsageLog;
+use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 
@@ -632,18 +633,19 @@ class UsageAggregator
             ->groupBy(\DB::raw($dateExpr))
             ->orderBy(\DB::raw($dateExpr))
             ->having('requests', '>', 0)
-            ->get();
+            ->get()
+            ->toArray();
 
+        // Both passes return Eloquent models. toArray() above turns each one
+        // into its attribute array; an (array) cast would expose the model's
+        // internal property bag instead and the row would lose its date.
         $otherTagged = [];
         foreach ($otherRows as $r) {
-            $r->bucket = self::OTHER_BUCKET;
-            $otherTagged[] = (array) $r;
+            $r['bucket'] = self::OTHER_BUCKET;
+            $otherTagged[] = $r;
         }
 
-        return array_merge(
-            array_map(fn($r) => is_array($r) ? $r : (array) $r, $topRows),
-            $otherTagged,
-        );
+        return array_merge($topRows, $otherTagged);
     }
 
     /**
@@ -686,8 +688,8 @@ class UsageAggregator
      * across the window. Lets the dashboard answer "is this premium model
      * actually worth its rate" without the UI having to redo the math.
      *
-     * Pure — exposed for unit testing. Operates on either array-rows or
-     * stdClass-rows (Eloquent's selectRaw produces stdClass).
+     * Pure, exposed for unit testing. Operates on array-rows, stdClass-rows
+     * (query builder) and Eloquent models (anything Arrayable).
      *
      * @param array<int, array<string, mixed>|object> $rows
      * @return array<int, array<string, mixed>>
@@ -696,7 +698,13 @@ class UsageAggregator
     {
         $out = [];
         foreach ($rows as $row) {
-            $r = is_array($row) ? $row : (array) $row;
+            // A model must go through toArray(): an (array) cast yields its
+            // internal property bag, not its attributes.
+            $r = match (true) {
+                is_array($row)            => $row,
+                $row instanceof Arrayable => $row->toArray(),
+                default                   => (array) $row,
+            };
             $tokens = (int) ($r['input_tokens'] ?? 0) + (int) ($r['output_tokens'] ?? 0);
             $cost = (float) ($r['cost_usd'] ?? 0.0);
             $r['cost_per_1k_tokens'] = $tokens > 0

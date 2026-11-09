@@ -312,7 +312,8 @@ class UsageAggregatorTest extends TestCase
 
     public function testAttachCostPerThousandAcceptsObjectRows(): void
     {
-        // Eloquent's selectRaw returns stdClass — must accept those too.
+        // The query builder (DB::table) returns stdClass rows. Must accept
+        // those too. Eloquent models are covered in UsageAggregatorSeriesTest.
         $rows = [
             (object) ['model' => 'claude', 'input_tokens' => 500, 'output_tokens' => 500, 'cost_usd' => 0.005],
         ];
