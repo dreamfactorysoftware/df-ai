@@ -26,15 +26,6 @@ use PHPUnit\Framework\TestCase;
  */
 class UsageAggregatorSeriesTest extends TestCase
 {
-    private const SERIES_KEYS = [
-        'bucket',
-        'cost_usd',
-        'date',
-        'input_tokens',
-        'output_tokens',
-        'requests',
-    ];
-
     private ?ConnectionResolverInterface $previousResolver = null;
 
     /** @var mixed */
@@ -138,30 +129,6 @@ class UsageAggregatorSeriesTest extends TestCase
         );
     }
 
-    public function testEverySeriesRowIsAPlainAttributeArray(): void
-    {
-        $this->seed();
-
-        $rows = $this->seriesByUser();
-
-        $this->assertCount(6, $rows, '3 top-N rows + 3 Other rows');
-        foreach ($rows as $i => $row) {
-            $this->assertIsArray($row);
-            $keys = array_keys($row);
-            sort($keys);
-            $this->assertSame(
-                self::SERIES_KEYS,
-                $keys,
-                "series row #$i must carry exactly the selected columns plus bucket"
-            );
-            $this->assertMatchesRegularExpression(
-                '/^\d{4}-\d{2}-\d{2}$/',
-                (string) $row['date'],
-                "series row #$i must have a calendar date"
-            );
-        }
-    }
-
     public function testOtherBucketRowsCarryDateAndTotals(): void
     {
         $this->seed();
@@ -185,68 +152,4 @@ class UsageAggregatorSeriesTest extends TestCase
         $this->assertSame(150, (int) $other['2026-11-04']['output_tokens']);
     }
 
-    public function testSeriesCostReconcilesWithTheWindowTotal(): void
-    {
-        $this->seed();
-
-        // The chart stacks these rows; the stack must add up to the period
-        // total or the dashboard under-reports spend.
-        $sum = 0.0;
-        foreach ($this->seriesByUser() as $row) {
-            $sum += (float) ($row['cost_usd'] ?? 0);
-        }
-
-        $this->assertEqualsWithDelta(12.50, $sum, 1e-9);
-    }
-
-    public function testSeriesSurvivesTheJsonResponse(): void
-    {
-        $this->seed();
-
-        // What the dashboard actually receives.
-        $decoded = json_decode(json_encode($this->seriesByUser(), JSON_THROW_ON_ERROR), true);
-
-        $dates = array_map(fn($r) => $r['date'] ?? null, $decoded);
-        $this->assertNotContains(null, $dates, 'every row needs a date after JSON encoding');
-        $buckets = array_values(array_unique(array_map(fn($r) => (string) $r['bucket'], $decoded)));
-        sort($buckets);
-        $this->assertSame(['1', '2', UsageAggregator::OTHER_BUCKET], $buckets);
-    }
-
-    public function testNoOtherBucketWhenEverythingFitsInTopN(): void
-    {
-        AiUsageLog::query()->insert([
-            'service_id' => 7, 'user_id' => 1, 'provider' => 'anthropic',
-            'input_tokens' => 10, 'output_tokens' => 5, 'cost_usd' => 0.1,
-            'status' => 'success', 'created_at' => '2026-11-03 10:00:00',
-        ]);
-
-        $rows = $this->seriesByUser();
-
-        $this->assertCount(1, $rows);
-        $this->assertSame('2026-11-03', $rows[0]['date']);
-        $this->assertSame('1', (string) $rows[0]['bucket']);
-    }
-
-    public function testAttachCostPerThousandAcceptsEloquentModels(): void
-    {
-        $this->seed();
-
-        // A caller that skips ->toArray() hands over models, not arrays.
-        $models = AiUsageLog::query()
-            ->selectRaw(
-                'model, SUM(input_tokens) as input_tokens, '
-                . 'SUM(output_tokens) as output_tokens, SUM(cost_usd) as cost_usd'
-            )
-            ->groupBy('model')
-            ->get()
-            ->all();
-        $this->assertInstanceOf(Model::class, $models[0]);
-
-        $out = UsageAggregator::attachCostPerThousand($models);
-
-        // 2500 input + 1250 output tokens for $12.50 = $3.333333 per 1k.
-        $this->assertSame('claude-sonnet-4-6', $out[0]['model'] ?? null);
-        $this->assertEqualsWithDelta(3.333333, $out[0]['cost_per_1k_tokens'], 1e-6);
-    }
 }

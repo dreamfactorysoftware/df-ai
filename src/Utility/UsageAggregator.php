@@ -6,7 +6,6 @@ namespace DreamFactory\Core\AI\Utility;
 
 use DreamFactory\Core\AI\Models\AiConnectionConfig;
 use DreamFactory\Core\AI\Models\AiUsageLog;
-use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 
@@ -688,8 +687,8 @@ class UsageAggregator
      * across the window. Lets the dashboard answer "is this premium model
      * actually worth its rate" without the UI having to redo the math.
      *
-     * Pure, exposed for unit testing. Operates on array-rows, stdClass-rows
-     * (query builder) and Eloquent models (anything Arrayable).
+     * Pure — exposed for unit testing. Operates on either array-rows or
+     * stdClass-rows (Eloquent's selectRaw produces stdClass).
      *
      * @param array<int, array<string, mixed>|object> $rows
      * @return array<int, array<string, mixed>>
@@ -698,13 +697,7 @@ class UsageAggregator
     {
         $out = [];
         foreach ($rows as $row) {
-            // A model must go through toArray(): an (array) cast yields its
-            // internal property bag, not its attributes.
-            $r = match (true) {
-                is_array($row)            => $row,
-                $row instanceof Arrayable => $row->toArray(),
-                default                   => (array) $row,
-            };
+            $r = is_array($row) ? $row : (array) $row;
             $tokens = (int) ($r['input_tokens'] ?? 0) + (int) ($r['output_tokens'] ?? 0);
             $cost = (float) ($r['cost_usd'] ?? 0.0);
             $r['cost_per_1k_tokens'] = $tokens > 0
