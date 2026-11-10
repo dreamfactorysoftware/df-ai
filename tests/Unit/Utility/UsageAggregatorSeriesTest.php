@@ -84,12 +84,10 @@ class UsageAggregatorSeriesTest extends TestCase
         parent::tearDown();
     }
 
-    /**
-     * Three users plus unattributed rows over three days. With topN = 2 the
-     * third user and the null-user rows fall into the Other bucket.
-     */
-    private function seed(): void
+    public function testOtherBucketRowsCarryDateAndTotals(): void
     {
+        // Three users plus unattributed rows over three days. With topN = 2
+        // the third user and the null-user rows fall into the Other bucket.
         $rows = [
             // [user_id, created_at, input, output, cost]
             [1, '2026-11-03 10:00:00', 1000, 500, 5.00],
@@ -115,26 +113,17 @@ class UsageAggregatorSeriesTest extends TestCase
                 'created_at'    => $createdAt,
             ]);
         }
-    }
 
-    /** @return array<int, array<string, mixed>> */
-    private function seriesByUser(): array
-    {
-        return UsageAggregator::seriesByDimension(
+        $series = UsageAggregator::seriesByDimension(
             Carbon::parse('2026-11-01 00:00:00'),
             'sqlite',
             [],
             'user_id',
             2,
         );
-    }
-
-    public function testOtherBucketRowsCarryDateAndTotals(): void
-    {
-        $this->seed();
 
         $other = [];
-        foreach ($this->seriesByUser() as $row) {
+        foreach ($series as $row) {
             if (($row['bucket'] ?? null) === UsageAggregator::OTHER_BUCKET) {
                 $other[$row['date'] ?? '(no date)'] = $row;
             }
@@ -151,5 +140,4 @@ class UsageAggregatorSeriesTest extends TestCase
         $this->assertSame(300, (int) $other['2026-11-04']['input_tokens']);
         $this->assertSame(150, (int) $other['2026-11-04']['output_tokens']);
     }
-
 }
