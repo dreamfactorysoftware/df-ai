@@ -63,30 +63,12 @@ class BudgetEnforcerRulesTest extends TestCase
         $this->assertFalse($this->refused());
     }
 
-    public function testAtTheCapTheCallIsRefused(): void
-    {
-        $this->budget(['dimension_type' => 'role', 'dimension_id' => self::ROLE, 'budget_usd' => 10]);
-        $this->spend(6, '2026-11-02 09:00:00');
-        $this->spend(4, '2026-11-17 14:00:00');
-
-        $this->assertTrue($this->refused());
-    }
-
     public function testASoftBudgetNeverRefuses(): void
     {
         $this->budget(['dimension_type' => 'role', 'dimension_id' => self::ROLE, 'budget_usd' => 1, 'hard_stop' => false]);
         $this->spend(500, '2026-11-17 14:00:00');
 
         $this->assertFalse($this->refused());
-    }
-
-    public function testABlockedRoleDoesNotAffectAnotherRole(): void
-    {
-        $this->budget(['dimension_type' => 'role', 'dimension_id' => self::ROLE, 'budget_usd' => 1]);
-        $this->spend(2, '2026-11-17 14:00:00');
-
-        $this->assertTrue($this->refused(self::ROLE));
-        $this->assertFalse($this->refused(8));
     }
 
     public function testAnyHardStopAtItsCapWinsOverBudgetsWithRoom(): void

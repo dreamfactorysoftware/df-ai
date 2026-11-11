@@ -209,10 +209,10 @@ class InternalBudgetController extends Controller
     /**
      * Decide the stored webhook auth header after the other fields are
      * filled. The header is write-only, so nobody who edits a rule can read
-     * it. It was entered for one receiver: when the URL moves to another
-     * scheme, host or port and no new header comes with it, the stored one
-     * is dropped. Otherwise an editor could point the URL at a server of
-     * their own and collect a secret they were never shown.
+     * it. It was entered for one receiver: when the URL changes at all and no
+     * new header comes with it, the stored one is dropped. Shared receivers
+     * route by path, so even a path change could hand the secret to someone
+     * else.
      */
     public static function resolveAuthHeader(AiBudget $budget, bool $clear, string $newHeader): void
     {
@@ -221,22 +221,9 @@ class InternalBudgetController extends Controller
         } elseif ($newHeader !== '') {
             $budget->alert_webhook_auth_header = $newHeader;
         } elseif ($budget->exists && $budget->hasAlertWebhookAuth()
-            && self::origin($budget->getOriginal('alert_webhook_url')) !== self::origin($budget->alert_webhook_url)) {
+            && $budget->isDirty('alert_webhook_url')) {
             $budget->alert_webhook_auth_header = null;
         }
-    }
-
-    /** scheme://host:port of a URL, lower-case, or '' when there is none. */
-    private static function origin(?string $url): string
-    {
-        $parts = parse_url((string) $url) ?: [];
-        if (empty($parts['host'])) {
-            return '';
-        }
-        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
-        $port = (int) ($parts['port'] ?? ($scheme === 'https' ? 443 : 80));
-
-        return $scheme . '://' . strtolower($parts['host']) . ':' . $port;
     }
 
     /** @return array<string, mixed> */

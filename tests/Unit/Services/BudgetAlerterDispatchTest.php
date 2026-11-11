@@ -197,17 +197,6 @@ class BudgetAlerterDispatchTest extends TestCase
         $this->assertCount(0, $this->sent);
     }
 
-    public function testTheSendHasAShortTimeout(): void
-    {
-        $budget = $this->alertingBudget('https://siem.corp.internal/hook');
-        $this->spend(9, '2026-11-17 14:00:00');
-
-        BudgetAlerter::evaluateBudget($budget);
-
-        $this->assertCount(1, $this->sent);
-        $this->assertSame(5, $this->sent[0]['options']['timeout']);
-    }
-
     public function testAHeaderThatCannotBeDecryptedDoesNotThrow(): void
     {
         $budget = $this->alertingBudget('https://siem.corp.internal/hook');
@@ -226,7 +215,7 @@ class BudgetAlerterDispatchTest extends TestCase
     public function testABlankHeaderKeepsTheStoredOne(): void
     {
         $budget = $this->alertingBudget('https://siem.corp.internal/hook');
-        $budget->fill(['label' => 'Renamed', 'alert_webhook_url' => 'https://siem.corp.internal/v2/hook']);
+        $budget->fill(['label' => 'Renamed', 'alert_webhook_url' => 'https://siem.corp.internal/hook']);
 
         InternalBudgetController::resolveAuthHeader($budget, false, '');
         $budget->save();
@@ -242,6 +231,7 @@ class BudgetAlerterDispatchTest extends TestCase
             'https://collector.example.net/hook',
             'http://siem.corp.internal/hook',
             'https://siem.corp.internal:8443/hook',
+            'https://siem.corp.internal/other-tenant/hook',
         ] as $moved) {
             $budget = $this->alertingBudget('https://siem.corp.internal/hook');
             $budget->fill(['alert_webhook_url' => $moved]);

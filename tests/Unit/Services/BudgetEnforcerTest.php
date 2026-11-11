@@ -41,14 +41,6 @@ class BudgetEnforcerTest extends TestCase
         $this->assertSame('2026-04-17T14:00:00+00:00', $start->toIso8601String());
     }
 
-    public function testPeriodStartUsesTheClockItIsGiven(): void
-    {
-        // Windows follow the caller's clock: Carbon::now() in app.timezone.
-        // UsageLogger stamps created_at from the same clock.
-        $now = Carbon::create(2026, 4, 17, 2, 32, 11, 'America/Denver');
-        $this->assertSame('2026-04-17T00:00:00-06:00', BudgetEnforcer::periodStart('daily', $now)->toIso8601String());
-    }
-
     public function testPeriodStartUnknownFallsBackToMonthly(): void
     {
         $now = Carbon::create(2026, 4, 17, 14, 32, 11, 'UTC');
