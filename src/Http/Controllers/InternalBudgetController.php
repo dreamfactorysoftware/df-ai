@@ -20,8 +20,8 @@ use Illuminate\Support\Facades\Validator;
  *
  * alert_webhook_auth_header is write-only. Responses carry
  * has_alert_webhook_auth instead. An empty value on PATCH keeps the stored
- * header; clear_alert_webhook_auth=true removes it, and so does moving the
- * URL to another host without sending a new header.
+ * header; clear_alert_webhook_auth=true removes it, and so does changing the
+ * URL without sending a new header.
  */
 class InternalBudgetController extends Controller
 {
