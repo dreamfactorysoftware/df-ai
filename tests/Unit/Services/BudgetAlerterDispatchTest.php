@@ -19,6 +19,8 @@ use Illuminate\Encryption\Encrypter;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Facade;
 use PHPUnit\Framework\TestCase;
+
+require_once __DIR__ . '/../../Support/BudgetDatabase.php';
 use Psr\Log\NullLogger;
 
 /**

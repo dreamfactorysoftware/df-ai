@@ -11,6 +11,8 @@ use Illuminate\Database\Capsule\Manager as Capsule;
 use Illuminate\Support\Carbon;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/../../Support/BudgetDatabase.php';
+
 /**
  * The enforcement rules, run against real queries on an in-memory database.
  *

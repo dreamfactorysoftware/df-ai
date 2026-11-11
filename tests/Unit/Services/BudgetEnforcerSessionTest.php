@@ -12,6 +12,8 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Facade;
 use PHPUnit\Framework\TestCase;
 
+require_once __DIR__ . '/../../Support/BudgetDatabase.php';
+
 /**
  * The REST entry points: enforce() and isBlocked() check the calling
  * session, which is the same attribution UsageLogger writes on the row.
