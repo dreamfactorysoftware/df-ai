@@ -5,6 +5,8 @@ namespace DreamFactory\Core\AI\Resources;
 use DreamFactory\Core\AI\Providers\AiProviderInterface;
 use DreamFactory\Core\AI\Providers\Streaming\SseRelay;
 use DreamFactory\Core\AI\Services\AiConnection;
+use DreamFactory\Core\AI\Services\BudgetAlerter;
+use DreamFactory\Core\AI\Services\BudgetEnforcer;
 use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\AI\Utility\AuditDispatcher;
 use DreamFactory\Core\AI\Utility\PromptLogger;
@@ -154,6 +156,7 @@ class CompletionResource extends BaseRestResource
         $provider = $service->getProvider();
 
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
+        BudgetEnforcer::enforce($service->getServiceId());
 
         if (!empty($payload['stream'])) {
             return $this->handleStream($service, $provider, $payload);
@@ -185,6 +188,7 @@ class CompletionResource extends BaseRestResource
                 'success',
             );
             AuditDispatcher::dispatch($service->getServiceId(), UsageLogger::requestId());
+            BudgetAlerter::afterRequest($service->getServiceId());
 
             return $result;
         } catch (\Throwable $e) {
@@ -291,6 +295,10 @@ class CompletionResource extends BaseRestResource
                         $latencyMs,
                         $totals['error_message'] ?? 'unknown streaming error',
                     );
+                }
+
+                if ($totals['status'] !== 'error') {
+                    BudgetAlerter::afterRequest($serviceId);
                 }
             }
         }, 200, [

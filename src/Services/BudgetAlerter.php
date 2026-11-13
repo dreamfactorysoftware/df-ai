@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace DreamFactory\Core\AI\Services;
 
 use DreamFactory\Core\AI\Models\AiBudget;
+use DreamFactory\Core\Utility\Session;
 use GuzzleHttp\Client;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
@@ -45,6 +46,20 @@ class BudgetAlerter
     }
 
     /**
+     * afterCall() for the calling session. Never throws: the provider call
+     * already succeeded and was billed, so an alerting failure must not
+     * turn it into an error.
+     */
+    public static function afterRequest(int $serviceId): void
+    {
+        try {
+            self::afterCall($serviceId, Session::getCurrentUserId(), Session::getRoleId(), Session::get('app.id'));
+        } catch (\Throwable $e) {
+            Log::warning('AI budget alert check failed: ' . $e->getMessage(), ['service_id' => $serviceId]);
+        }
+    }
+
+    /**
      * For one budget, check each threshold in order and fire if newly
      * crossed. Pure-ish (touches DB to update last_alerted_*_at and
      * fires webhooks) — exposed so a unit test can pass an in-memory
@@ -54,6 +69,11 @@ class BudgetAlerter
     {
         if (!$budget->is_active || empty($budget->alert_webhook_url)) {
             return; // Nothing to alert to.
+        }
+        if (!WebhookGuard::enabled()) {
+            // Alert webhooks are off on this server. Leave the thresholds
+            // unmarked so the alerts fire once an operator turns them on.
+            return;
         }
 
         $now = $now ?? Carbon::now();
@@ -73,13 +93,33 @@ class BudgetAlerter
                 continue;
             }
             $last = $budget->{$column};
-            if ($last === null || $last->lt($periodStart)) {
+            if (($last === null || $last->lt($periodStart))
+                && self::claimThreshold($budget, $column, $periodStart, $now)) {
                 self::fireAlert($budget, $pct, $spend, $cap);
-                $budget->{$column} = $now;
-                $budget->save();
             }
             return; // Only fire the highest crossed threshold per call.
         }
+    }
+
+    /**
+     * Mark the threshold as alerted, in the database, and report whether
+     * this call was the one that marked it. Two requests can both load the
+     * budget before either marks it. Only the one whose update lands sends
+     * the alert, so a threshold is announced once.
+     */
+    private static function claimThreshold(AiBudget $budget, string $column, Carbon $periodStart, Carbon $now): bool
+    {
+        $claimed = AiBudget::query()
+            ->whereKey($budget->getKey())
+            ->where(function ($q) use ($column, $periodStart) {
+                $q->whereNull($column)->orWhere($column, '<', $periodStart);
+            })
+            ->update([$column => $now]);
+
+        $budget->setAttribute($column, $now);
+        $budget->syncOriginalAttribute($column);
+
+        return $claimed > 0;
     }
 
     /**
@@ -129,13 +169,20 @@ class BudgetAlerter
     {
         $payload = self::buildPayload($budget, $pct, $spend, $cap);
 
-        $headers = ['Content-Type' => 'application/json'];
-        if (!empty($budget->alert_webhook_auth_header)) {
-            $headers['Authorization'] = (string) $budget->alert_webhook_auth_header;
-        }
-
         try {
-            self::client()->request('POST', (string) $budget->alert_webhook_url, [
+            // Inside the try: reading the header decrypts it, and that
+            // throws if APP_KEY changed after the header was stored.
+            $headers = ['Content-Type' => 'application/json'];
+            if (!empty($budget->alert_webhook_auth_header)) {
+                $headers['Authorization'] = (string) $budget->alert_webhook_auth_header;
+            }
+
+            // Checked again here, not only when the rule was saved: the host
+            // can resolve somewhere else by now, and rows written before the
+            // check existed were never checked. Throws when refused.
+            $pinned = WebhookGuard::requestOptions((string) $budget->alert_webhook_url);
+
+            self::client()->request('POST', (string) $budget->alert_webhook_url, $pinned + [
                 'json'    => $payload,
                 'headers' => $headers,
                 'timeout' => 5,
@@ -151,7 +198,9 @@ class BudgetAlerter
     private static function client(): Client
     {
         if (self::$client === null) {
-            self::$client = new Client(['timeout' => 5]);
+            // No redirects: a redirect would resend the payload, and could
+            // resend the auth header, to a URL no admin configured.
+            self::$client = new Client(['timeout' => 5, 'connect_timeout' => 3, 'allow_redirects' => false]);
         }
         return self::$client;
     }

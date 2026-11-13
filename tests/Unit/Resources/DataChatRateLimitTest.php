@@ -257,4 +257,30 @@ class DataChatRateLimitTest extends TestCase
             'Loop must report 1 iteration when the provider returns no tool calls.'
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Budget cap inside the agentic loop
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * handlePOST() checks the cap once. The loop can then make up to
+     * max_iterations provider calls, so it must check again before each one
+     * after the first, and before the provider is called.
+     */
+    public function testAgenticLoopChecksTheBudgetBeforeEachFurtherProviderCall(): void
+    {
+        $loopStart = strpos($this->source, 'private function runAgenticLoop(');
+        $this->assertNotFalse($loopStart, 'runAgenticLoop() not found in DataChatResource.');
+        $loopBody = substr($this->source, $loopStart);
+
+        $forPos = strpos($loopBody, 'for ($iteration = 0;');
+        $checkPos = strpos($loopBody, '$iteration > 0 && BudgetEnforcer::isBlocked(');
+        $callPos = strpos($loopBody, '$provider->chatWithTools(');
+
+        $this->assertNotFalse($forPos, 'The agentic for loop was not found.');
+        $this->assertNotFalse($checkPos, 'runAgenticLoop() must check BudgetEnforcer::isBlocked() on later iterations.');
+        $this->assertNotFalse($callPos);
+        $this->assertGreaterThan($forPos, $checkPos, 'The budget check must be inside the loop.');
+        $this->assertLessThan($callPos, $checkPos, 'The budget check must come before the provider call.');
+    }
 }

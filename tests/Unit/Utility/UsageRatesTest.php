@@ -39,6 +39,14 @@ class UsageRatesTest extends TestCase
         );
     }
 
+    public function testCostForClampsNegativeRates(): void
+    {
+        // A negative rate in a connection's rate sheet must not log negative
+        // cost: a budget sums cost_usd, so that would lift the cap.
+        $this->assertSame(0.0, UsageRates::costFor(1000, 1000, -0.003, -0.015));
+        $this->assertEqualsWithDelta(0.015, UsageRates::costFor(1000, 1000, -0.003, 0.015), 1e-9);
+    }
+
     public function testCostForClampsNegativeTokenCounts(): void
     {
         // Defensive: a buggy provider might emit a -1 sentinel. Don't refund.

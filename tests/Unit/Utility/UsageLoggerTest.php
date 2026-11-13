@@ -91,4 +91,50 @@ class UsageLoggerTest extends TestCase
 
         $this->assertNotSame($first, $second, 'Distinct PHP requests must get distinct request ids');
     }
+
+    public function testRequestIdNeverExceedsTheColumnWidth(): void
+    {
+        // The same id goes to ai_usage_log and ai_prompt_log, both 36 wide.
+        // A 64 character trace id from the request header used to make both
+        // inserts fail: no spend counted and no prompt audit row.
+        UsageLogger::setRequestId(str_repeat('a', 30) . str_repeat('b', 34));
+
+        $this->assertSame(str_repeat('a', 30) . str_repeat('b', 6), UsageLogger::requestId());
+    }
+
+    public function testFitColumnsCutsALongTraceIdToTheColumnWidth(): void
+    {
+        // TraceId accepts 8 to 64 characters from the X-DreamFactory-Trace-Id
+        // header. ai_usage_log.request_id is char(36). Uncut, a strict
+        // database refuses the insert, the failure is swallowed, and the call
+        // is never counted against any budget.
+        $traceId = str_repeat('a', 64);
+
+        $row = UsageLogger::fitColumns(['request_id' => $traceId, 'model' => 'gpt-4o']);
+
+        $this->assertSame(36, strlen($row['request_id']));
+        $this->assertSame(substr($traceId, 0, 36), $row['request_id']);
+        $this->assertSame('gpt-4o', $row['model']);
+    }
+
+    public function testFitColumnsCutsEveryBoundedStringColumn(): void
+    {
+        $row = UsageLogger::fitColumns([
+            'resource'      => str_repeat('r', 51),
+            'provider'      => str_repeat('p', 51),
+            'model'         => str_repeat('m', 201),
+            'status'        => str_repeat('s', 21),
+            'request_id'    => '0d0c8b6e-2f0f-4c55-9d0c-5a4f7a4f3b21',
+            'error_message' => str_repeat('e', 5000),
+            'input_tokens'  => 12,
+        ]);
+
+        $this->assertSame(50, strlen($row['resource']));
+        $this->assertSame(50, strlen($row['provider']));
+        $this->assertSame(200, strlen($row['model']));
+        $this->assertSame(20, strlen($row['status']));
+        $this->assertSame('0d0c8b6e-2f0f-4c55-9d0c-5a4f7a4f3b21', $row['request_id'], 'a UUID fits and is kept whole');
+        $this->assertSame(5000, strlen($row['error_message']), 'text columns are not cut');
+        $this->assertSame(12, $row['input_tokens']);
+    }
 }

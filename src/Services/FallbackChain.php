@@ -55,6 +55,12 @@ class FallbackChain
         $lastException = null;
 
         foreach ($serviceIds as $index => $serviceId) {
+            // The caller checked the primary. A fallback can have its own
+            // hard cap, so skip it and keep the primary's error.
+            if ($index > 0 && BudgetEnforcer::isBlocked($serviceId)) {
+                continue;
+            }
+
             try {
                 $provider = AiProviderFactory::fromServiceId($serviceId);
                 return $fn($provider, $serviceId, $index);

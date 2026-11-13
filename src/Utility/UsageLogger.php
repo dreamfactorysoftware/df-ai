@@ -22,6 +22,23 @@ class UsageLogger
     private static ?string $requestId = null;
 
     /**
+     * Widths of the string columns in ai_usage_log. A strict database
+     * refuses a longer value, and a refused insert is spend that no budget
+     * counts. The trace id alone can be 64 characters (TraceId accepts that
+     * from the X-DreamFactory-Trace-Id request header) against char(36).
+     */
+    private const COLUMN_WIDTHS = [
+        'resource'   => 50,
+        'provider'   => 50,
+        'model'      => 200,
+        'status'     => 20,
+        'request_id' => 36,
+    ];
+
+    /** Largest value cost_usd decimal(10,6) holds. */
+    private const MAX_COST_USD = 9999.999999;
+
+    /**
      * Log a successful AI request.
      *
      * @param array{provider?: string, model?: string, input_tokens?: int, output_tokens?: int, tool_call_count?: int} $result
@@ -81,7 +98,7 @@ class UsageLogger
      */
     public static function setRequestId(string $id): void
     {
-        self::$requestId = $id;
+        self::$requestId = self::fitRequestId($id);
     }
 
     public static function requestId(): string
@@ -89,9 +106,38 @@ class UsageLogger
         if (self::$requestId === null) {
             // Default to the platform trace id so ai_usage_log/ai_prompt_log rows
             // join with mcp_request_log and every other hop of the same action.
-            self::$requestId = \DreamFactory\Core\Utility\TraceId::get();
+            self::$requestId = self::fitRequestId(\DreamFactory\Core\Utility\TraceId::get());
         }
         return self::$requestId;
+    }
+
+    /**
+     * Every table that stores this id holds 36 characters (ai_usage_log,
+     * ai_prompt_log). A caller can send a trace id of up to 64. Cut it here,
+     * once, so the usage row and the prompt audit row are both written and
+     * still carry the same id.
+     */
+    private static function fitRequestId(string $id): string
+    {
+        return substr($id, 0, self::COLUMN_WIDTHS['request_id']);
+    }
+
+    /**
+     * Cut each string value to the width of its column. Pure, so the rule
+     * that keeps a usage row insertable is unit-tested without a database.
+     *
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    public static function fitColumns(array $row): array
+    {
+        foreach (self::COLUMN_WIDTHS as $column => $width) {
+            if (is_string($row[$column] ?? null) && mb_strlen($row[$column]) > $width) {
+                $row[$column] = mb_substr($row[$column], 0, $width);
+            }
+        }
+
+        return $row;
     }
 
     private static function write(
@@ -118,7 +164,7 @@ class UsageLogger
                 ? 0.0
                 : UsageRates::estimate($serviceId, $provider, $model, $inputTokens, $outputTokens);
 
-            AiUsageLog::create([
+            $row = self::fitColumns([
                 'service_id'      => $serviceId,
                 'user_id'         => Session::getCurrentUserId(),
                 'role_id'         => Session::getRoleId(),
@@ -129,14 +175,30 @@ class UsageLogger
                 'input_tokens'    => $inputTokens,
                 'output_tokens'   => $outputTokens,
                 'tool_call_count' => (int) ($result['tool_call_count'] ?? 0),
-                'cost_usd'        => $costUsd,
+                'cost_usd'        => min($costUsd, self::MAX_COST_USD),
                 'latency_ms'      => $latencyMs,
                 'status'          => $status,
                 'error_message'   => $errorMessage,
                 'request_id'      => self::requestId(),
+                // Set here, not by the column default: budget and dashboard
+                // windows come from this clock, and the database clock can
+                // sit in another time zone.
+                'created_at'      => now(),
             ]);
+
+            try {
+                AiUsageLog::create($row);
+            } catch (\Throwable $e) {
+                // The app clock can name a local time the database zone skips
+                // (the hour lost when daylight saving starts), and a strict
+                // database refuses it. Let the column default stamp the row
+                // rather than lose the spend.
+                unset($row['created_at']);
+                AiUsageLog::create($row);
+            }
         } catch (\Throwable $e) {
-            Log::warning('Failed to log AI usage: ' . $e->getMessage());
+            // A lost row is spend no budget will ever count.
+            Log::error('Failed to log AI usage, budgets will undercount: ' . $e->getMessage());
         }
     }
 }

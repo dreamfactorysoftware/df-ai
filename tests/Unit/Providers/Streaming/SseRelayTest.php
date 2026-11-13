@@ -185,6 +185,79 @@ class SseRelayTest extends TestCase
         $this->assertNull($result['error_message']);
     }
 
+    public function testDriveDrainsForTokenCountsAfterClientAbort(): void
+    {
+        // Every provider reports token counts in the last frames. A client
+        // that hangs up after the first delta used to be logged with zero
+        // tokens, so the call cost nothing against a budget. Drive must keep
+        // reading the provider, without writing, until the counts arrive.
+        $pulled = [];
+        $events = (function () use (&$pulled) {
+            foreach ([
+                ['type' => 'delta', 'text' => 'first'],
+                ['type' => 'delta', 'text' => 'second'],
+                ['type' => 'usage', 'input_tokens' => 900, 'output_tokens' => 350],
+                ['type' => 'finish', 'reason' => 'stop'],
+                ['type' => 'done'],
+            ] as $event) {
+                $pulled[] = $event['type'];
+                yield $event;
+            }
+        })();
+
+        $sunk = [];
+        $result = SseRelay::drive(
+            $events,
+            function (string $frame) use (&$sunk): bool {
+                $sunk[] = $frame;
+                return false; // client is gone after the first frame
+            },
+            'openai',
+            'gpt-4o',
+            'cid',
+        );
+
+        $this->assertSame('partial', $result['status']);
+        $this->assertSame(900, $result['input_tokens']);
+        $this->assertSame(350, $result['output_tokens']);
+        $this->assertCount(1, $sunk, 'nothing is written to a client that has gone');
+        $this->assertSame(['delta', 'delta', 'usage'], $pulled, 'reading stops once the counts are in');
+    }
+
+    public function testDriveEstimatesOutputWhenNoCountsEverArrive(): void
+    {
+        // An OpenAI-compatible server that ignores stream_options.include_usage
+        // never sends counts. Zero tokens would log $0 for every streamed call.
+        $events = (function () {
+            yield ['type' => 'delta', 'text' => str_repeat('a', 40)];
+            yield ['type' => 'delta', 'text' => str_repeat('b', 41)];
+            yield ['type' => 'finish', 'reason' => 'stop'];
+            yield ['type' => 'done'];
+        })();
+
+        $result = SseRelay::drive($events, fn(string $f): bool => true, 'openai_compatible', 'local', 'cid');
+
+        $this->assertSame('success', $result['status']);
+        $this->assertSame(0, $result['input_tokens']);
+        $this->assertSame(21, $result['output_tokens'], '81 characters at about 4 per token, rounded up');
+    }
+
+    public function testDriveStopsDrainingWhenTheDeadlinePasses(): void
+    {
+        $events = (function () {
+            yield ['type' => 'delta', 'text' => 'abcdefgh'];
+            yield ['type' => 'delta', 'text' => 'ijklmnop'];
+            $this->fail('should not read past the drain deadline');
+            yield ['type' => 'usage', 'input_tokens' => 1, 'output_tokens' => 1];
+        })();
+
+        // A deadline already in the past: one more frame is read, then stop.
+        $result = SseRelay::drive($events, fn(string $f): bool => false, 'openai', 'gpt-4o', 'cid', 0.000001);
+
+        $this->assertSame('partial', $result['status']);
+        $this->assertSame(4, $result['output_tokens'], 'estimated from the 16 characters that were generated');
+    }
+
     public function testDriveReturnsPartialWhenStreamEndsWithoutDone(): void
     {
         // No `done` event emitted by the provider — status defaults to

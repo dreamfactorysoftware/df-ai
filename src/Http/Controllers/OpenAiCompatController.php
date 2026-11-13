@@ -374,6 +374,7 @@ class OpenAiCompatController extends Controller
                         $totals['status'],
                     );
                     AuditDispatcher::dispatch($serviceId, UsageLogger::requestId());
+                    BudgetAlerter::afterRequest($serviceId);
                 }
             }
         }, 200, [
