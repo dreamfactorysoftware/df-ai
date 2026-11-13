@@ -632,18 +632,19 @@ class UsageAggregator
             ->groupBy(\DB::raw($dateExpr))
             ->orderBy(\DB::raw($dateExpr))
             ->having('requests', '>', 0)
-            ->get();
+            ->get()
+            ->toArray();
 
+        // Both passes return Eloquent models. toArray() above turns each one
+        // into its attribute array; an (array) cast would expose the model's
+        // internal property bag instead and the row would lose its date.
         $otherTagged = [];
         foreach ($otherRows as $r) {
-            $r->bucket = self::OTHER_BUCKET;
-            $otherTagged[] = (array) $r;
+            $r['bucket'] = self::OTHER_BUCKET;
+            $otherTagged[] = $r;
         }
 
-        return array_merge(
-            array_map(fn($r) => is_array($r) ? $r : (array) $r, $topRows),
-            $otherTagged,
-        );
+        return array_merge($topRows, $otherTagged);
     }
 
     /**
