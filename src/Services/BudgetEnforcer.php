@@ -110,9 +110,49 @@ class BudgetEnforcer
         }
     }
 
-    private static function checkSession(int $serviceId): void
+    /**
+     * check() for the calling session. Throws the AiProviderException, for
+     * callers that shape their own error response.
+     *
+     * @throws AiProviderException
+     */
+    public static function checkSession(int $serviceId): void
     {
-        self::check($serviceId, Session::getCurrentUserId(), Session::getRoleId(), Session::get('app.id'));
+        self::check($serviceId, ...self::sessionAttribution());
+    }
+
+    /**
+     * The calling session's user, role and app ids, as ints or null.
+     *
+     * The session does not type them. The app id an API key resolves to
+     * comes back from the Redis cache as a numeric string, which
+     * strict_types refuses for an ?int parameter. Read the session
+     * through here rather than passing Session values on.
+     *
+     * @return array{0: ?int, 1: ?int, 2: ?int} [userId, roleId, appId]
+     */
+    public static function sessionAttribution(): array
+    {
+        return [
+            self::normalizeId(Session::getCurrentUserId()),
+            self::normalizeId(Session::getRoleId()),
+            self::normalizeId(Session::get('app.id')),
+        ];
+    }
+
+    /**
+     * An int, or a string of digits, as an int. Anything else is no id.
+     */
+    public static function normalizeId(mixed $id): ?int
+    {
+        if (is_int($id)) {
+            return $id;
+        }
+        if (is_string($id) && ctype_digit($id)) {
+            return (int) $id;
+        }
+
+        return null;
     }
 
     /**

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace DreamFactory\Core\AI\Services;
 
 use DreamFactory\Core\AI\Models\AiBudget;
-use DreamFactory\Core\Utility\Session;
 use GuzzleHttp\Client;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Log;
@@ -53,7 +52,7 @@ class BudgetAlerter
     public static function afterRequest(int $serviceId): void
     {
         try {
-            self::afterCall($serviceId, Session::getCurrentUserId(), Session::getRoleId(), Session::get('app.id'));
+            self::afterCall($serviceId, ...BudgetEnforcer::sessionAttribution());
         } catch (\Throwable $e) {
             Log::warning('AI budget alert check failed: ' . $e->getMessage(), ['service_id' => $serviceId]);
         }

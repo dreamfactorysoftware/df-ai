@@ -210,6 +210,33 @@ class BudgetAlerterDispatchTest extends TestCase
         $this->assertCount(0, $this->sent, 'the alert is dropped, the AI call is not failed');
     }
 
+    public function testAfterRequestAlertsOnTheBudgetOfTheApiKeyApp(): void
+    {
+        // The app an API key resolves to is a numeric string in the session.
+        if (!class_exists('Session', false)) {
+            class_alias(\Illuminate\Support\Facades\Session::class, 'Session');
+        }
+        Container::getInstance()->instance('session', new class {
+            public function get(string $key, mixed $default = null): mixed
+            {
+                return ['app.id' => '9'][$key] ?? $default;
+            }
+        });
+        Facade::clearResolvedInstances();
+
+        $budget = $this->alertingBudget('https://siem.corp.internal/hook');
+        \Illuminate\Database\Capsule\Manager::table('ai_budget')
+            ->where('id', $budget->id)
+            ->update(['dimension_type' => 'app', 'dimension_id' => 9]);
+        $this->spend(9, '2026-11-17 14:00:00', ['user_id' => null, 'role_id' => null]);
+
+        BudgetAlerter::afterRequest(1);
+
+        $this->assertCount(1, $this->sent);
+        $payload = json_decode((string) $this->sent[0]['request']->getBody(), true);
+        $this->assertSame(['app', 9], [$payload['budget']['dimension_type'], $payload['budget']['dimension_id']]);
+    }
+
     // ─── the stored auth header when a rule is edited ─────────────────────
 
     public function testABlankHeaderKeepsTheStoredOne(): void
