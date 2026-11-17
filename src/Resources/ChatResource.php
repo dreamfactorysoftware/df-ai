@@ -16,7 +16,6 @@ use DreamFactory\Core\AI\Utility\UsageLogger;
 use Illuminate\Support\Facades\Log;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
-use DreamFactory\Core\Utility\Session;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -241,12 +240,7 @@ class ChatResource extends BaseRestResource
 
             // Post-call budget threshold detection. Fires webhooks when
             // a budget crosses 50/80/100% — once per threshold per period.
-            BudgetAlerter::afterCall(
-                $serviceId,
-                Session::getCurrentUserId(),
-                Session::getRoleId(),
-                Session::get('app.id'),
-            );
+            BudgetAlerter::afterRequest($serviceId);
 
             if ($attemptIdx > 0) {
                 Log::info("AI fallback attempt #{$attemptIdx} succeeded on service {$serviceId}", [
