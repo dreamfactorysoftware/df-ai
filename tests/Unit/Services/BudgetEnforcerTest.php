@@ -81,4 +81,25 @@ class BudgetEnforcerTest extends TestCase
         $b->setRawAttributes(['dimension_type' => 'mystery', 'dimension_id' => 99], true);
         $this->assertSame('AI spend', BudgetEnforcer::describeDimension($b));
     }
+
+    public function testNormalizeIdTakesIntsAndDigitStringsOnly(): void
+    {
+        // Session ids are untyped. An app resolved from an API key is a
+        // numeric string; check() takes ?int under strict_types.
+        $cases = [
+            [9, 9],
+            ['9', 9],
+            ['1001', 1001],
+            [null, null],
+            ['', null],
+            ['abc', null],
+            ['9.5', null],
+            ['-9', null],
+            [' 9', null],
+            [true, null],
+        ];
+        foreach ($cases as [$raw, $expected]) {
+            $this->assertSame($expected, BudgetEnforcer::normalizeId($raw), var_export($raw, true));
+        }
+    }
 }

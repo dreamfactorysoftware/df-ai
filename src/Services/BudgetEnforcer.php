@@ -7,6 +7,8 @@ namespace DreamFactory\Core\AI\Services;
 use DreamFactory\Core\AI\Exceptions\AiProviderException;
 use DreamFactory\Core\AI\Models\AiBudget;
 use DreamFactory\Core\AI\Models\AiUsageLog;
+use DreamFactory\Core\Exceptions\TooManyRequestsException;
+use DreamFactory\Core\Utility\Session;
 use Illuminate\Support\Carbon;
 
 /**
@@ -73,6 +75,84 @@ class BudgetEnforcer
                 );
             }
         }
+    }
+
+    /**
+     * REST entry point: check the calling session and refuse with HTTP 429.
+     *
+     * The caller's session is the same attribution UsageLogger records, so
+     * the spend a budget sums is the spend this check is made against. Run
+     * it outside any try block that logs errors and outside FallbackChain:
+     * a refused call adds no usage row and tries no other connection.
+     *
+     * @throws TooManyRequestsException
+     */
+    public static function enforce(int $serviceId): void
+    {
+        try {
+            self::checkSession($serviceId);
+        } catch (AiProviderException $e) {
+            throw new TooManyRequestsException($e->getMessage());
+        }
+    }
+
+    /**
+     * Whether the calling session is at a hard cap on this connection.
+     * FallbackChain uses this to skip a capped fallback connection.
+     */
+    public static function isBlocked(int $serviceId): bool
+    {
+        try {
+            self::checkSession($serviceId);
+            return false;
+        } catch (AiProviderException) {
+            return true;
+        }
+    }
+
+    /**
+     * check() for the calling session. Throws the AiProviderException, for
+     * callers that shape their own error response.
+     *
+     * @throws AiProviderException
+     */
+    public static function checkSession(int $serviceId): void
+    {
+        self::check($serviceId, ...self::sessionAttribution());
+    }
+
+    /**
+     * The calling session's user, role and app ids, as ints or null.
+     *
+     * The session does not type them. The app id an API key resolves to
+     * comes back from the Redis cache as a numeric string, which
+     * strict_types refuses for an ?int parameter. Read the session
+     * through here rather than passing Session values on.
+     *
+     * @return array{0: ?int, 1: ?int, 2: ?int} [userId, roleId, appId]
+     */
+    public static function sessionAttribution(): array
+    {
+        return [
+            self::normalizeId(Session::getCurrentUserId()),
+            self::normalizeId(Session::getRoleId()),
+            self::normalizeId(Session::get('app.id')),
+        ];
+    }
+
+    /**
+     * An int, or a string of digits, as an int. Anything else is no id.
+     */
+    public static function normalizeId(mixed $id): ?int
+    {
+        if (is_int($id)) {
+            return $id;
+        }
+        if (is_string($id) && ctype_digit($id)) {
+            return (int) $id;
+        }
+
+        return null;
     }
 
     /**

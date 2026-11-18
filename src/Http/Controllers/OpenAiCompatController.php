@@ -121,12 +121,7 @@ class OpenAiCompatController extends Controller
         try {
             $primaryProvider = AiProviderFactory::fromServiceId($serviceId);
             RateLimiter::check($serviceId, $primaryProvider->getProviderName());
-            BudgetEnforcer::check(
-                $serviceId,
-                Session::getCurrentUserId(),
-                Session::getRoleId(),
-                Session::get('app.id'),
-            );
+            BudgetEnforcer::checkSession($serviceId);
         } catch (AiProviderException $e) {
             return $this->errorResponse(
                 $e->getHttpStatus() ?: 429,
@@ -246,12 +241,7 @@ class OpenAiCompatController extends Controller
             );
             AuditDispatcher::dispatch($serviceId, UsageLogger::requestId());
 
-            BudgetAlerter::afterCall(
-                $serviceId,
-                Session::getCurrentUserId(),
-                Session::getRoleId(),
-                Session::get('app.id'),
-            );
+            BudgetAlerter::afterRequest($serviceId);
 
             if ($attemptIdx > 0) {
                 Log::info("OpenAI-compat fallback attempt #{$attemptIdx} succeeded", [
@@ -374,6 +364,7 @@ class OpenAiCompatController extends Controller
                         $totals['status'],
                     );
                     AuditDispatcher::dispatch($serviceId, UsageLogger::requestId());
+                    BudgetAlerter::afterRequest($serviceId);
                 }
             }
         }, 200, [

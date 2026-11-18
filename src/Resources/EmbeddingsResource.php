@@ -3,6 +3,8 @@
 namespace DreamFactory\Core\AI\Resources;
 
 use DreamFactory\Core\AI\Services\AiConnection;
+use DreamFactory\Core\AI\Services\BudgetAlerter;
+use DreamFactory\Core\AI\Services\BudgetEnforcer;
 use DreamFactory\Core\AI\Services\RateLimiter;
 use DreamFactory\Core\AI\Utility\UsageLogger;
 use DreamFactory\Core\Exceptions\BadRequestException;
@@ -133,6 +135,7 @@ class EmbeddingsResource extends BaseRestResource
         $provider = $service->getProvider();
 
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
+        BudgetEnforcer::enforce($service->getServiceId());
 
         $start = hrtime(true);
 
@@ -149,6 +152,8 @@ class EmbeddingsResource extends BaseRestResource
                 'input_tokens'  => $result['usage']['prompt_tokens'] ?? $result['usage']['total_tokens'] ?? 0,
                 'output_tokens' => 0,
             ], $latencyMs);
+
+            BudgetAlerter::afterRequest($service->getServiceId());
 
             return $result;
         } catch (\Throwable $e) {

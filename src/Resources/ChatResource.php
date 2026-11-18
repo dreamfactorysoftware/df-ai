@@ -16,7 +16,6 @@ use DreamFactory\Core\AI\Utility\UsageLogger;
 use Illuminate\Support\Facades\Log;
 use DreamFactory\Core\Exceptions\BadRequestException;
 use DreamFactory\Core\Resources\BaseRestResource;
-use DreamFactory\Core\Utility\Session;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -182,17 +181,9 @@ class ChatResource extends BaseRestResource
 
         RateLimiter::check($service->getServiceId(), $provider->getProviderName());
 
-        // Pre-call budget check. Throws AiProviderException(429) when
-        // any matching hard-stop budget is at or above its cap. The
-        // attribution we pass is the request's CALLING context (admin
-        // user etc.); attribution attached to outbound provider calls
-        // is the same in the non-orchestrator path.
-        BudgetEnforcer::check(
-            $service->getServiceId(),
-            Session::getCurrentUserId(),
-            Session::getRoleId(),
-            Session::get('app.id'),
-        );
+        // Pre-call budget check. Refuses with HTTP 429 when any matching
+        // hard-stop budget is at or above its cap.
+        BudgetEnforcer::enforce($service->getServiceId());
 
         if (!empty($payload['stream'])) {
             return $this->handleStream($service, $provider, $payload);
@@ -249,12 +240,7 @@ class ChatResource extends BaseRestResource
 
             // Post-call budget threshold detection. Fires webhooks when
             // a budget crosses 50/80/100% — once per threshold per period.
-            BudgetAlerter::afterCall(
-                $serviceId,
-                Session::getCurrentUserId(),
-                Session::getRoleId(),
-                Session::get('app.id'),
-            );
+            BudgetAlerter::afterRequest($serviceId);
 
             if ($attemptIdx > 0) {
                 Log::info("AI fallback attempt #{$attemptIdx} succeeded on service {$serviceId}", [
@@ -376,6 +362,10 @@ class ChatResource extends BaseRestResource
                         $latencyMs,
                         $totals['error_message'] ?? 'unknown streaming error',
                     );
+                }
+
+                if ($totals['status'] !== 'error') {
+                    BudgetAlerter::afterRequest($serviceId);
                 }
             }
         }, 200, [
